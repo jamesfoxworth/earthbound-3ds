@@ -1,11 +1,13 @@
 #include "platform/platform.h"
 #include <3ds.h>
 #include <string.h>
+#include <stdio.h>
 
 /*
- * Milestone 1: native SNES viewport (EB_VIEWPORT_WIDTH/HEIGHT = 256x224)
- * centered on the physical 400x240 top screen. No widescreen fill, stereo
- * 3D, or bottom-screen use yet.
+ * Top screen presentation. The viewport is the full 400x240 panel, so the
+ * centering offsets below are zero; they remain so a narrower viewport still
+ * lands centered. The bottom screen currently hosts a debug console and will
+ * become the touch UI.
  *
  * Scanlines are accumulated into a linear row-major staging buffer (cheap
  * sequential writes, stays cached), then transposed into the screen
@@ -32,6 +34,9 @@ bool platform_video_init(void) {
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
+
+    /* Debug console on the otherwise unused bottom screen. */
+    consoleInit(GFX_BOTTOM, NULL);
 
     /* Only the centered 256x224 region is drawn each frame, so clear both
      * buffers once — otherwise the surrounding letterbox is uninitialized
@@ -68,21 +73,17 @@ pixel_t *platform_video_get_framebuffer(void) {
     return frame;
 }
 
-/* Diagnostic: when set, end_frame skips the transpose. The PPU row of the
- * profiling overlay times begin_frame + ppu_render_frame + end_frame, so the
- * drop in that number while this is held is the transpose's share of the
- * frame — the figure that decides whether presentation is worth moving onto
- * the GPU. The screen keeps whatever was last presented while held. */
-bool platform_video_skip_blit;
+/* Transpose cost, averaged over the last second and printed to the bottom
+ * screen console. Measured here rather than inferred from the profiling
+ * overlay's PPU row: that row is stamped into the scanline data, so any
+ * diagnostic that stops refreshing the screen also freezes the number it is
+ * meant to report. */
+static uint64_t blit_ticks_acc;
+static int blit_frames;
 
 void platform_video_end_frame(void) {
     u16 fbw = 0, fbh = 0;
-
-    if (platform_video_skip_blit) {
-        gfxFlushBuffers();
-        gfxSwapBuffers();
-        return;
-    }
+    uint64_t t0 = svcGetSystemTick();
 
     /* Reported dimensions are in framebuffer space: fbw is the panel's short
      * axis (240), fbh its long axis (400). Use them rather than assuming, so
@@ -103,6 +104,18 @@ void platform_video_end_frame(void) {
             *dst-- = *src;
             src += EB_VIEWPORT_WIDTH;
         }
+    }
+
+    blit_ticks_acc += svcGetSystemTick() - t0;
+    if (++blit_frames >= 60) {
+        uint32_t usec = (uint32_t)(blit_ticks_acc / blit_frames
+                                   / (SYSCLOCK_ARM11 / 1000000));
+        /* Home the cursor so the figure updates in place. */
+        printf("\x1b[0;0Htranspose %3lu.%02lu ms/frame  (%dx%d)   ",
+               (unsigned long)(usec / 1000), (unsigned long)((usec % 1000) / 10),
+               EB_VIEWPORT_WIDTH, EB_VIEWPORT_HEIGHT);
+        blit_ticks_acc = 0;
+        blit_frames = 0;
     }
 
     /* Request the flip and return. The vblank wait lives in

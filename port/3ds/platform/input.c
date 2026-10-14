@@ -2,9 +2,6 @@
 #include "include/pad.h"
 #include <3ds.h>
 
-/* Diagnostic flag defined in video.c */
-extern bool platform_video_skip_blit;
-
 /* Global mode flags (declared extern in platform.h) */
 bool platform_headless = false;
 bool platform_skip_intro = false;
@@ -60,11 +57,6 @@ void platform_input_poll(void) {
      * detection and toggling centrally, so one tap is one toggle. Chosen over
      * ZL/ZR because those only exist on New 3DS. */
     aux_state = (held & KEY_TOUCH) ? AUX_FPS_TOGGLE : 0;
-
-    /* Hold ZL (New 3DS only) to suppress the framebuffer transpose, so the
-     * overlay's PPU row shows the frame cost without it. See
-     * platform_video_skip_blit in video.c. */
-    platform_video_skip_blit = (held & KEY_ZL) != 0;
 }
 
 uint16_t platform_input_get_pad(void) {
