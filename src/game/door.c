@@ -20,6 +20,7 @@
 
 #include <math.h>
 #include "include/binary.h"
+#include "core/log.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -159,6 +160,15 @@ static void check_door_event_flag(uint16_t door_offset) {
     /* Assembly lines 24-36: determine expected state.
      * If event_flag > 0x8000 (BLTEQ: unsigned <=), expected = 1; else expected = 0. */
     bool expected = (event_flag_raw > 0x8000);
+
+    /* A flag-gated door only runs its scripted interaction while the flag is
+     * in the expected state; otherwise the caller falls through to a plain
+     * transition. Trace both outcomes: a scene whose script failed to set its
+     * flag is indistinguishable from an ordinary door at the player's end. */
+    LOG_TRACE("door: off=$%04X flag=$%04X id=%u val=%d expected=%d -> %s\n",
+              door_offset & 0x7FFF, event_flag_raw, flag_id,
+              (int)flag_value, (int)expected,
+              (flag_value == expected) ? "scripted" : "plain door");
 
     /* If flag matches expected, queue the door's text interaction */
     if (flag_value == expected) {

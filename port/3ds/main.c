@@ -1,5 +1,6 @@
 #include "platform/platform.h"
 #include "game_main.h"
+#include "core/log.h"
 #include <3ds.h>
 
 /* Defined in platform/video.c */
@@ -34,6 +35,11 @@ int main(void) {
         if (launch_keys & KEY_L) {
             consoleDebugInit(debugDevice_CONSOLE);
             platform_console_logging = true;
+            verbose_level = 2;  /* also enable LOG_TRACE (door/script detail) */
+            /* Confirm on screen that it armed. Without this, "nothing printed"
+             * is ambiguous between the key not being read at launch and the
+             * log simply having nothing to say. */
+            printf("log: on (verbose=2)\n");
         }
     }
 
