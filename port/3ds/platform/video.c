@@ -33,6 +33,17 @@ bool platform_video_init(void) {
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
+    /* Only the centered 256x224 region is drawn each frame, so clear both
+     * buffers once — otherwise the surrounding letterbox is uninitialized
+     * memory that alternates as the buffers flip. */
+    for (int i = 0; i < 2; i++) {
+        u16 w = 0, h = 0;
+        u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
+        if (fb)
+            memset(fb, 0, (size_t)w * h * sizeof(pixel_t));
+        gfxSwapBuffers();
+    }
+
     /* New 3DS runs homebrew at the old 268MHz clock unless the app opts in.
      * No-op on an original 3DS. */
     osSetSpeedupEnable(true);
@@ -80,11 +91,15 @@ void platform_video_end_frame(void) {
         }
     }
 
+    /* Request the flip and return. The vblank wait lives in
+     * platform_timer_frame_end() — keeping it here put a blocking sleep
+     * inside the region game_main.c times as "PPU", so render cost and idle
+     * headroom were indistinguishable. Hardware applies the flip at vblank,
+     * so issuing it before the wait still presents a whole frame. */
     gfxFlushBuffers();
-    gspWaitForVBlank();
     gfxSwapBuffers();
 }
 
 void platform_video_set_vsync(bool enabled) {
-    (void)enabled; /* always paced by gspWaitForVBlank() above */
+    (void)enabled; /* always paced by the vblank wait in frame_end */
 }

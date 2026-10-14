@@ -30,11 +30,17 @@ void platform_timer_frame_start(void) {
 }
 
 void platform_timer_frame_end(void) {
-    int fps = game_is_fast_forward() ? TARGET_FPS * EB_FAST_FORWARD_MULTIPLIER : TARGET_FPS;
-    uint64_t target_ticks = ticks_per_sec / (uint64_t)fps;
-
-    uint64_t deadline = frame_start_ticks + target_ticks;
-    platform_timer_sleep_until(deadline);
+    /* Normal speed: pace on the display's own vblank (~59.83Hz) rather than
+     * the tick clock, so presentation and pacing share one authority. Under
+     * fast-forward there is no vblank multiple to target, so fall back to the
+     * tick deadline. */
+    if (game_is_fast_forward()) {
+        uint64_t target_ticks =
+            ticks_per_sec / ((uint64_t)TARGET_FPS * EB_FAST_FORWARD_MULTIPLIER);
+        platform_timer_sleep_until(frame_start_ticks + target_ticks);
+    } else {
+        gspWaitForVBlank();
+    }
 
     platform_timer_update_fps();
 }
