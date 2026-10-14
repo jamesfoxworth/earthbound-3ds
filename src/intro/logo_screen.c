@@ -179,6 +179,18 @@ static StepResult intro_logo_begin(IntroLogoState *s) {
     return intro_logo_push_fade(MF_IN, 1, 2);
 }
 
+/* Restore the viewport state logo_screen_load() mutated, so it does not leak
+ * into whatever runs next. BG3 explicit-FILL plus a sprite_y_offset are only
+ * correct while a logo owns the screen; left set, they persist through
+ * attract mode and the first overworld frames (overworld_setup_vram() clears
+ * them, but that does not run until the first map load). On a native-width
+ * viewport this was inert, but a wider viewport renders the stale FILL layer
+ * full width every frame for no reason. */
+static void intro_logo_restore_viewport(void) {
+    ppu.bg_viewport_fill[2] = BG_VIEWPORT_CENTER;
+    ppu.sprite_y_offset = 0;
+}
+
 StepResult mode_step_intro_logo(ModeState *st) {
     IntroLogoState *s = &st->intro_logo;
 
@@ -203,14 +215,18 @@ StepResult mode_step_intro_logo(ModeState *st) {
         return STEP_RESULT_CONTINUE();
 
     case LG_DONE_FADE:
-        if (s->skipping)
+        if (s->skipping) {
+            intro_logo_restore_viewport();
             return STEP_RESULT_POP(1);
+        }
         if (s->logo_idx < 2) {
             s->logo_idx++;
             return intro_logo_begin(s);
         }
+        intro_logo_restore_viewport();
         return STEP_RESULT_POP(0);
     }
+    intro_logo_restore_viewport();
     return STEP_RESULT_POP(0);
 }
 
