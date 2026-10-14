@@ -1,6 +1,7 @@
 #include "platform/platform.h"
 #include "game/window.h"
 #include "snes/ppu.h"
+#include "game/game_state.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -218,14 +219,30 @@ void platform_video_end_frame(void) {
     if (!platform_console_logging)
         mirror_focused_window_to_bottom();
 
+    /* Palette readout, console mode only: the BG sub-palettes the PPU actually
+     * renders from, next to the flavour that selected them. Compare against
+     * text_window_flavour_palettes.pal to tell a wrong palette index from
+     * wrong palette contents from a tile/attribute problem. */
     blit_ticks_acc += svcGetSystemTick() - t0;
-    if (++blit_frames >= 60 && !platform_console_logging) {
-        uint32_t usec = (uint32_t)(blit_ticks_acc / blit_frames
-                                   / (SYSCLOCK_ARM11 / 1000000));
-        /* Home the cursor so the figure updates in place. */
-        printf("\x1b[0;0Htranspose %3lu.%02lu ms/frame  (%dx%d)   ",
-               (unsigned long)(usec / 1000), (unsigned long)((usec % 1000) / 10),
-               EB_VIEWPORT_WIDTH, EB_VIEWPORT_HEIGHT);
+
+    if (++blit_frames >= 60) {
+        if (platform_console_logging) {
+            printf("\x1b[2;0Hflavour=%u  hppp_opt=%04X\n",
+                   (unsigned)game_state.text_flavour,
+                   (unsigned)party_characters[0].hp_pp_window_options);
+            for (int sp = 0; sp < 8; sp++) {
+                printf("cg%d: %04X %04X %04X %04X\n", sp,
+                       ppu.cgram[sp * 4 + 0], ppu.cgram[sp * 4 + 1],
+                       ppu.cgram[sp * 4 + 2], ppu.cgram[sp * 4 + 3]);
+            }
+        } else {
+            uint32_t usec = (uint32_t)(blit_ticks_acc / blit_frames
+                                       / (SYSCLOCK_ARM11 / 1000000));
+            /* Home the cursor so the figure updates in place. */
+            printf("\x1b[0;0Htranspose %3lu.%02lu ms/frame  (%dx%d)   ",
+                   (unsigned long)(usec / 1000), (unsigned long)((usec % 1000) / 10),
+                   EB_VIEWPORT_WIDTH, EB_VIEWPORT_HEIGHT);
+        }
         blit_ticks_acc = 0;
         blit_frames = 0;
     }
