@@ -27,6 +27,7 @@
 #include "entity/entity.h"
 #include "entity/sprite.h"
 #include "data/assets.h"
+#include "data/text_legacy_map.h"
 #include "include/binary.h"
 #include "include/constants.h"
 #include "include/pad.h"
@@ -509,17 +510,51 @@ typedef struct {
 } TextBlock;
 
 
+/* Translate an original SNES ROM text address to its dialogue blob address.
+ *
+ * The packers rewrite the text pointers they can find statically — door data,
+ * event scripts, config tables — but an address the game assembles at runtime
+ * never passes through them and arrives here still in ROM space. text_legacy_map
+ * is the same remap table those packers use, sorted by SNES address.
+ *
+ * Returns 0 when the address is not a known labelled entry. */
+static uint32_t translate_legacy_text_addr(uint32_t addr) {
+    size_t lo = 0, hi = TEXT_LEGACY_MAP_COUNT;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        uint32_t probe = text_legacy_map[mid].snes;
+        if (probe == addr)
+            return text_legacy_map[mid].blob;
+        if (probe < addr)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return 0;
+}
+
 /* Resolve a text address to a byte pointer.
  *
  * Address ranges:
  *   0x000000 .. 0x0FFFFF  — inline string table (item/enemy descriptions)
  *   0x100000 .. 0xBFFFFF  — dialogue blob (compiled from YAML)
+ *   0xC00000 and above    — original SNES ROM address, translated via
+ *                           text_legacy_map (see above)
  *
  * *out_block receives the data source for size-remaining calculation.
  * Returns NULL if the address cannot be resolved. */
 static const uint8_t *resolve_text_addr(uint32_t addr, TextBlock **out_block) {
     static TextBlock dialogue_block = {0};
     static TextBlock string_table_block = {0};
+
+    /* Legacy ROM-space pointer: map it into the blob before the range checks
+     * below, which only understand the new address space. */
+    if (addr >= 0xC00000) {
+        uint32_t mapped = translate_legacy_text_addr(addr);
+        if (mapped == 0)
+            return NULL;
+        addr = mapped;
+    }
 
     /* Dialogue blob */
     if (addr >= DIALOGUE_BLOB_BASE && dialogue_blob != NULL) {
