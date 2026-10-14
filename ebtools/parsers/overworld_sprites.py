@@ -450,8 +450,14 @@ def pack_sprites(
     # Parse groupings from original data
     groupings = parse_sprite_groupings(ptr_table, bytes(grouping_data))
 
-    # Find all PNG files with matching JSON
-    json_files = sorted(png_dir.glob("*.json"))
+    # Find all PNG files with matching JSON.
+    #
+    # `ebtools extract` also writes two data tables into this directory that
+    # are not sprite sheets and have no PNG counterpart. Exclude them by name
+    # rather than skipping anything that lacks a PNG, so a real sprite with a
+    # missing PNG is still reported as an error below.
+    NON_SPRITE_JSON = {"entity_overlay_data", "spritemap_config"}
+    json_files = sorted(p for p in png_dir.glob("*.json") if p.stem not in NON_SPRITE_JSON)
     if not json_files:
         print("No sprite JSON files found in", png_dir)
         return
