@@ -128,6 +128,13 @@ typedef struct {
 /* Global PPU state */
 extern PPUState ppu;
 
+/* Vertical offset the last render applied to SNES-space scanlines. Zero
+ * whenever some layer fills the viewport, non-zero when the SNES image is
+ * centred in a taller one — so it cannot be computed from the viewport
+ * dimensions alone. Horizontally a centred layer always lands at
+ * +EB_VIEWPORT_PAD_LEFT. Needed to map window tile positions onto the frame. */
+extern int ppu_frame_y_offset;
+
 /* Initialize PPU to power-on state */
 void ppu_init(void);
 

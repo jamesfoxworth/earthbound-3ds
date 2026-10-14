@@ -163,6 +163,10 @@ void ppu_prepare_palette(void) {
 #define TILE_CACHE_MASK  (TILE_CACHE_SIZE - 1)
 #define TILE_CACHE_EMPTY 0xFFFFFFFF
 
+/* Vertical offset applied to SNES-space scanlines when producing the output
+ * frame; see where it is assigned in ppu_render_frame_ex(). */
+int ppu_frame_y_offset = 0;
+
 static TileRowCacheEntry tile_row_cache[EB_PPU_NUM_RENDER_CONTEXTS][TILE_CACHE_SIZE];
 
 /* Decode a single 2bpp tile row (8 pixels) — unrolled, no loop.
@@ -1473,6 +1477,13 @@ void PPU_HOT_FUNC(ppu_render_frame_ex)(int ctx_id, int y_start, int y_end,
         fb_x_offset = EB_VIEWPORT_PAD_LEFT;  /* negative when viewport < SNES */
         fb_y_offset = EB_VIEWPORT_HEIGHT > SNES_HEIGHT ? (EB_VIEWPORT_HEIGHT - SNES_HEIGHT) / 2 : 0;
     }
+
+    /* Publish the vertical offset this pass used, for callers mapping
+     * SNES-space coordinates (window tile positions, say) onto the frame.
+     * It is only non-zero when nothing fills the viewport, so it cannot be
+     * derived from the viewport dimensions alone. Horizontally a centred
+     * layer always lands at +EB_VIEWPORT_PAD_LEFT, in both modes. */
+    ppu_frame_y_offset = fb_y_offset;
 
 #ifdef EB_PPU_PROFILE
     uint32_t prof_clear = 0, prof_bg = 0, prof_obj = 0;

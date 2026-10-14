@@ -1,5 +1,6 @@
 #include "platform/platform.h"
 #include "game/window.h"
+#include "snes/ppu.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -40,7 +41,6 @@ bool platform_video_init(void) {
      * EB_PIXEL_RGB565=1 (see core/types.h). */
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
     gfxSetDoubleBuffering(GFX_TOP, true);
-    gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
     /* Bottom screen: either a debug console (launched with L held) or the UI
      * mirror, which needs the same 16-bit format as the staging frame it
@@ -48,9 +48,14 @@ bool platform_video_init(void) {
      * main.c reads the launch keys before calling this so the choice is known
      * here. */
     if (platform_console_logging) {
+        gfxSetDoubleBuffering(GFX_BOTTOM, false);
         consoleInit(GFX_BOTTOM, NULL);
     } else {
         gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
+        /* Double-buffered: the mirror rewrites the whole screen each frame,
+         * and writing into the buffer being scanned out shows as a band
+         * tearing down the image. */
+        gfxSetDoubleBuffering(GFX_BOTTOM, true);
         u16 bw = 0, bh = 0;
         u8 *bfb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
         if (bfb)
@@ -119,28 +124,38 @@ static int blit_frames;
  * SNES_WIDTH centred in the wider viewport, so tile coordinates are offset by
  * the viewport padding to reach frame[] coordinates.
  */
-static const WindowInfo *find_active_window(uint8_t window_id) {
+static const WindowInfo *focused_window(void) {
+    uint8_t id = win.current_focus_window;
+    if (id == WINDOW_ID_NONE)
+        return NULL;
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (win.windows[i].active && win.windows[i].id == window_id)
+        if (win.windows[i].active && win.windows[i].id == id)
             return &win.windows[i];
     }
     return NULL;
 }
 
-static void mirror_window_to_bottom(uint8_t window_id) {
+static void mirror_focused_window_to_bottom(void) {
     u16 fbw = 0, fbh = 0;
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
     if (!fb)
         return;
 
-    const WindowInfo *w = find_active_window(window_id);
+    /* Whichever window has focus is the one the player is interacting with,
+     * so the mirror follows the overworld menu, the battle menus and the
+     * sub-menus without naming any of them. */
+    const WindowInfo *w = focused_window();
     if (!w || w->width == 0 || w->height == 0) {
         memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
         return;
     }
 
+    /* Window geometry is in SNES-space 8x8 tiles. A centred layer (BG3, which
+     * carries the windows) always lands at +EB_VIEWPORT_PAD_LEFT; the vertical
+     * offset depends on whether anything filled the viewport, so take the one
+     * the renderer actually used. */
     int src_x = w->x * 8 + EB_VIEWPORT_PAD_LEFT;
-    int src_y = w->y * 8 + EB_VIEWPORT_PAD_TOP;
+    int src_y = w->y * 8 + ppu_frame_y_offset;
     int src_w = w->width * 8;
     int src_h = w->height * 8;
 
@@ -198,10 +213,10 @@ void platform_video_end_frame(void) {
         }
     }
 
-    /* Stage 1: mirror the battle command menu. Skipped while the debug console
-     * owns the bottom screen (different pixel format). */
+    /* Stage 1: mirror the focused window. Skipped while the debug console owns
+     * the bottom screen (different pixel format). */
     if (!platform_console_logging)
-        mirror_window_to_bottom(WINDOW_COMMAND_MENU);
+        mirror_focused_window_to_bottom();
 
     blit_ticks_acc += svcGetSystemTick() - t0;
     if (++blit_frames >= 60 && !platform_console_logging) {
