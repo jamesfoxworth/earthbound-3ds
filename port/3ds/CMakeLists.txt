@@ -15,9 +15,10 @@ set(CMAKE_C_STANDARD 11)
 set(EB_VIEWPORT_WIDTH 400 CACHE STRING "Viewport width in pixels")
 set(EB_VIEWPORT_HEIGHT 240 CACHE STRING "Viewport height in pixels")
 
-# Audio is a separate milestone (needs an ndsp backend for the SPC700/DSP
-# emulator). Keeping it off for now reduces the surface area of this build.
-set(EB_ENABLE_AUDIO OFF CACHE BOOL "" FORCE)
+# Audio runs through platform/audio.c (ndsp). The engine's APU emulation needs
+# ~64KB of RAM, which is nothing here. Set OFF to fall back to silence if the
+# backend misbehaves.
+set(EB_ENABLE_AUDIO ON CACHE BOOL "" FORCE)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src
                  ${CMAKE_CURRENT_BINARY_DIR}/game_lib)
