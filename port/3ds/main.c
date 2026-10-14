@@ -35,11 +35,16 @@ int main(void) {
         if (launch_keys & KEY_L) {
             consoleDebugInit(debugDevice_CONSOLE);
             platform_console_logging = true;
-            verbose_level = 2;  /* also enable LOG_TRACE (door/script detail) */
-            /* Confirm on screen that it armed. Without this, "nothing printed"
+            /* Leave verbose_level at its default 1 (LOG_WARN). Raising it to 2
+             * enables LOG_TRACE, which includes per-entity, per-frame sprite
+             * tracing in callbacks.c — that floods the console and drops the
+             * frame rate to single digits. Targeted diagnostics get their own
+             * compile-time gate instead (e.g. EB_DEBUG_DOORS).
+             *
+             * Confirm on screen that it armed: without this, "nothing printed"
              * is ambiguous between the key not being read at launch and the
              * log simply having nothing to say. */
-            printf("log: on (verbose=2)\n");
+            printf("log: on\n");
         }
     }
 

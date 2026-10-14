@@ -38,6 +38,11 @@ target_compile_definitions(earthbound_game PRIVATE EB_PPU_FORCE_SPEED_OPT=1)
 # is enough. Logic still runs every frame.
 target_compile_definitions(earthbound_game PRIVATE EB_MAX_FRAME_SKIP=1)
 
+# Temporary: report flag-gated door outcomes while tracking down the prologue
+# door that walks Ness outside instead of letting Pokey in. One line per
+# distinct door event, visible with the L launch option. Remove once resolved.
+target_compile_definitions(earthbound_game PRIVATE EB_DEBUG_DOORS=1)
+
 file(GLOB PLATFORM_SOURCES "platform/*.c")
 
 add_executable(earthbound_3ds

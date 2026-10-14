@@ -161,14 +161,32 @@ static void check_door_event_flag(uint16_t door_offset) {
      * If event_flag > 0x8000 (BLTEQ: unsigned <=), expected = 1; else expected = 0. */
     bool expected = (event_flag_raw > 0x8000);
 
+#ifdef EB_DEBUG_DOORS
     /* A flag-gated door only runs its scripted interaction while the flag is
      * in the expected state; otherwise the caller falls through to a plain
-     * transition. Trace both outcomes: a scene whose script failed to set its
-     * flag is indistinguishable from an ordinary door at the player's end. */
-    LOG_TRACE("door: off=$%04X flag=$%04X id=%u val=%d expected=%d -> %s\n",
-              door_offset & 0x7FFF, event_flag_raw, flag_id,
-              (int)flag_value, (int)expected,
-              (flag_value == expected) ? "scripted" : "plain door");
+     * transition. Report both outcomes: a scene whose script failed to set its
+     * flag is indistinguishable from an ordinary door at the player's end.
+     *
+     * This runs while the leader merely stands next to a door, so log only
+     * when the outcome changes — one line per distinct door event instead of
+     * one per frame. */
+    {
+        static uint16_t last_off = 0xFFFF;
+        static uint16_t last_raw;
+        static int last_match = -1;
+        int match = (flag_value == expected);
+        if ((door_offset & 0x7FFF) != last_off || event_flag_raw != last_raw ||
+            match != last_match) {
+            last_off = door_offset & 0x7FFF;
+            last_raw = event_flag_raw;
+            last_match = match;
+            LOG_WARN("door: off=$%04X flag=$%04X id=%u val=%d want=%d -> %s\n",
+                     last_off, event_flag_raw, flag_id,
+                     (int)flag_value, (int)expected,
+                     match ? "scripted" : "plain door");
+        }
+    }
+#endif
 
     /* If flag matches expected, queue the door's text interaction */
     if (flag_value == expected) {
