@@ -7,10 +7,13 @@ endif()
 project(earthbound_3ds C)
 set(CMAKE_C_STANDARD 11)
 
-# Milestone 1: native SNES viewport, top screen only. No widescreen, stereo
-# 3D, or bottom-screen UI yet — those come once this boots and is playable.
-set(EB_VIEWPORT_WIDTH 256 CACHE STRING "Viewport width in pixels")
-set(EB_VIEWPORT_HEIGHT 224 CACHE STRING "Viewport height in pixels")
+# Full 400x240 top screen. The overworld's BG1/BG2 use 64-tile-wide (512px)
+# tilemaps, which the renderer fills across a wider viewport regardless of
+# bg_viewport_fill, so the extra width shows real map rather than a wrapped
+# copy. BG3 (text/HUD) stays CENTER, keeping windows in the 256px-wide
+# region. Battles, file select, title and logo already set FILL themselves.
+set(EB_VIEWPORT_WIDTH 400 CACHE STRING "Viewport width in pixels")
+set(EB_VIEWPORT_HEIGHT 240 CACHE STRING "Viewport height in pixels")
 
 # Audio is a separate milestone (needs an ndsp backend for the SPC700/DSP
 # emulator). Keeping it off for now reduces the surface area of this build.
