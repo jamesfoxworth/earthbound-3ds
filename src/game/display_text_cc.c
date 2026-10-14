@@ -2624,9 +2624,17 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
          * Prints the decimal number with leading spaces per number_padding. */
         uint32_t value = script_read_dword(r);
         if (value == 0) value = (uint32_t)get_argument_memory();
-        /* Delegate to print_number() like the assembly does
-         * (JSR PRINT_NUMBER in ccs/print_number.asm line 57). */
-        print_number((int)value, 0);
+        /* Same work print_number() does (JSR PRINT_NUMBER in
+         * ccs/print_number.asm line 57), but typed out: PRINT_NUMBER emits its
+         * digits through PRINT_LETTER (print_number.asm:68,86), so they carry
+         * the per-character delay like the rest of the line. The padding step
+         * still has to run synchronously — it moves the VWF cursor. */
+        {
+            char digits[12];
+            print_number_prepare((int)value, 0, digits, sizeof(digits));
+            if (!queue_text_prefix_ascii(r, digits))
+                print_string(digits);
+        }
         break;
     }
     case 0x0B: {
@@ -2682,7 +2690,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         uint32_t value = get_cnum();
         char buf[12];
         snprintf(buf, sizeof(buf), "%u", (unsigned)value);
-        print_string(buf);
+        if (!queue_text_prefix_ascii(r, buf))
+            print_string(buf);
         break;
     }
     case 0x11: {

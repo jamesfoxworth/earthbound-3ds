@@ -3414,15 +3414,18 @@ void print_string(const char *str) {
     }
 }
 
-void print_number(int value, int min_digits) {
+/* Formatting and cursor-padding half of print_number(), split out so a caller
+ * inside the dialogue loop can emit the digits through the typewriter instead
+ * of printing them synchronously. Leaves the formatted digits in out[]. */
+void print_number_prepare(int value, int min_digits, char *out, size_t out_size) {
     /* Port of PRINT_NUMBER (asm/text/print_number.asm).
      * Clamps to [0, 9999999], reads window number_padding for
      * right-alignment, then prints digits via print_string. */
     if (value > 9999999) value = 9999999;
     if (value < 0) value = 0;
 
-    char buf[12];
-    int digit_count = snprintf(buf, sizeof(buf), "%d", value);
+    char *buf = out;
+    int digit_count = snprintf(buf, out_size, "%d", value);
 
     /* Assembly lines 49-69: read number_padding from focus window.
      * Bit 7 set (default 128) = padding disabled.
@@ -3441,9 +3444,13 @@ void print_number(int value, int min_digits) {
         set_text_pixel_position(w->text_y, w->cursor_pixel_x + pad_pixels);
     } else if (min_digits > digit_count) {
         /* No window padding — fallback to caller-specified min_digits */
-        snprintf(buf, sizeof(buf), "%*d", min_digits, value);
+        snprintf(buf, out_size, "%*d", min_digits, value);
     }
+}
 
+void print_number(int value, int min_digits) {
+    char buf[12];
+    print_number_prepare(value, min_digits, buf, sizeof(buf));
     print_string(buf);
 }
 

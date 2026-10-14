@@ -29,6 +29,10 @@ void resolve_text_jump(ScriptReader *r, uint32_t addr);
  * draining, in which case print it directly instead. */
 bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len);
 
+/* queue_text_prefix() for an ASCII string, converting it to EB encoding
+ * first. For snprintf-formatted number digits. */
+bool queue_text_prefix_ascii(ScriptReader *r, const char *ascii);
+
 /* ---- Data helpers (display_text.c) ---- */
 void toggle_hppp_flipout_mode(uint16_t enable);
 uint16_t is_escargo_express_full(void);

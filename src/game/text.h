@@ -80,6 +80,12 @@ void print_eb_string(const uint8_t *eb_str, int len);
 /* Print an integer value at the current cursor position */
 void print_number(int value, int min_digits);
 
+/* print_number() without the emission: clamps, applies the focus window's
+ * number_padding (which moves the VWF cursor, so it must still run) and
+ * leaves the formatted digits in out[]. Lets a dialogue-loop caller type the
+ * digits out rather than printing them all at once. */
+void print_number_prepare(int value, int min_digits, char *out, size_t out_size);
+
 /* Clear the text area of a window */
 void clear_window_text(uint16_t window_id);
 

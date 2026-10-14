@@ -145,6 +145,26 @@ bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
     return true;
 }
 
+/* queue_text_prefix() for an ASCII string (number digits, which are formatted
+ * with snprintf rather than coming from EB-encoded game data). Leading spaces
+ * from right-alignment padding are preserved; only trailing padding is
+ * trimmed, by queue_text_prefix(). */
+bool queue_text_prefix_ascii(ScriptReader *r, const char *ascii) {
+    if (!r || !ascii)
+        return false;
+
+    uint8_t eb[32];
+    size_t n = 0;
+    while (ascii[n] != '\0' && n < sizeof(eb)) {
+        eb[n] = ascii_to_eb_char(ascii[n]);
+        n++;
+    }
+    if (n == 0)
+        return false;
+
+    return queue_text_prefix(r, eb, (int)n);
+}
+
 /* Map a TextSource tag back to its live asset base pointer. Readers are offset-
  * based (no raw pointers in ScriptReader) so they survive a save/reload; the base
  * is re-derived on each read. */
