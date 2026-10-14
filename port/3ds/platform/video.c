@@ -1,4 +1,6 @@
 #include "platform/platform.h"
+#include "game/window.h"
+#include "core/types.h"
 #include <3ds.h>
 #include <string.h>
 #include <stdio.h>
@@ -25,6 +27,11 @@
 
 static pixel_t frame[EB_VIEWPORT_WIDTH * EB_VIEWPORT_HEIGHT];
 
+/* Set by main.c from the launch keys when LOG_WARN output should own the
+ * bottom screen. Suppresses the UI mirror (which needs a different pixel
+ * format) and the transpose readout, so neither fights the console. */
+bool platform_console_logging;
+
 bool platform_video_init(void) {
     gfxInitDefault();
     /* gfxInitDefault() allocates BGR8 (3 bytes/pixel); the game renders
@@ -35,13 +42,21 @@ bool platform_video_init(void) {
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
-    /* Debug console on the otherwise unused bottom screen. stderr is swallowed
-     * by default: verbose_level is already 1, so the engine's LOG_WARN stream
-     * (unhandled callbacks, unknown script banks, unimplemented opcodes) is
-     * live but has had no sink on this platform. main.c routes it here when
-     * launched with L held. */
-    consoleInit(GFX_BOTTOM, NULL);
-    consoleDebugInit(debugDevice_NULL);
+    /* Bottom screen: either a debug console (launched with L held) or the UI
+     * mirror, which needs the same 16-bit format as the staging frame it
+     * copies from. stderr is swallowed unless main.c routes it to the console.
+     * main.c reads the launch keys before calling this so the choice is known
+     * here. */
+    if (platform_console_logging) {
+        consoleInit(GFX_BOTTOM, NULL);
+    } else {
+        gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
+        u16 bw = 0, bh = 0;
+        u8 *bfb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
+        if (bfb)
+            memset(bfb, 0, (size_t)bw * bh * sizeof(pixel_t));
+        consoleDebugInit(debugDevice_NULL);
+    }
 
     /* Only the centered 256x224 region is drawn each frame, so clear both
      * buffers once — otherwise the surrounding letterbox is uninitialized
@@ -86,9 +101,77 @@ pixel_t *platform_video_get_framebuffer(void) {
 static uint64_t blit_ticks_acc;
 static int blit_frames;
 
-/* Set when LOG_WARN output owns the console, so the readout below does not
- * fight it for the same screen. */
-bool platform_console_logging;
+#define BOTTOM_WIDTH   320
+#define BOTTOM_HEIGHT  240
+
+/*
+ * Bottom-screen UI, stage 1: mirror one window to the bottom screen while it
+ * still renders on top, so the two can be compared directly.
+ *
+ * The window's pixels are already composited into frame[] by the time
+ * end_frame runs, so this copies that rectangle rather than rasterizing the
+ * window's tilemap a second time. That means no second PPU pass, no scratch
+ * VRAM, and no way for this to change what the top screen shows — the
+ * suppression half (removing it from the top composite) is stage 2, and it is
+ * the half that touches shared state.
+ *
+ * Window geometry is in 8x8 tiles. BG3 (the window layer) renders at
+ * SNES_WIDTH centred in the wider viewport, so tile coordinates are offset by
+ * the viewport padding to reach frame[] coordinates.
+ */
+static const WindowInfo *find_active_window(uint8_t window_id) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (win.windows[i].active && win.windows[i].id == window_id)
+            return &win.windows[i];
+    }
+    return NULL;
+}
+
+static void mirror_window_to_bottom(uint8_t window_id) {
+    u16 fbw = 0, fbh = 0;
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
+    if (!fb)
+        return;
+
+    const WindowInfo *w = find_active_window(window_id);
+    if (!w || w->width == 0 || w->height == 0) {
+        memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
+        return;
+    }
+
+    int src_x = w->x * 8 + EB_VIEWPORT_PAD_LEFT;
+    int src_y = w->y * 8 + EB_VIEWPORT_PAD_TOP;
+    int src_w = w->width * 8;
+    int src_h = w->height * 8;
+
+    /* Clip to the staging frame. */
+    if (src_x < 0) { src_w += src_x; src_x = 0; }
+    if (src_y < 0) { src_h += src_y; src_y = 0; }
+    if (src_x + src_w > EB_VIEWPORT_WIDTH)  src_w = EB_VIEWPORT_WIDTH  - src_x;
+    if (src_y + src_h > EB_VIEWPORT_HEIGHT) src_h = EB_VIEWPORT_HEIGHT - src_y;
+    if (src_w <= 0 || src_h <= 0) {
+        memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
+        return;
+    }
+    if (src_w > BOTTOM_WIDTH)  src_w = BOTTOM_WIDTH;
+    if (src_h > BOTTOM_HEIGHT) src_h = BOTTOM_HEIGHT;
+
+    /* Centre it at 1:1 — no scaling, so the mirror is pixel-for-pixel. */
+    int dst_x = (BOTTOM_WIDTH  - src_w) / 2;
+    int dst_y = (BOTTOM_HEIGHT - src_h) / 2;
+
+    memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
+
+    /* Same column-major, Y-flipped layout as the top screen. */
+    for (int x = 0; x < src_w; x++) {
+        u16 *dst = &fb[(size_t)(dst_x + x) * fbw + (fbw - 1 - dst_y)];
+        const pixel_t *src = &frame[(size_t)src_y * EB_VIEWPORT_WIDTH + src_x + x];
+        for (int y = 0; y < src_h; y++) {
+            *dst-- = *src;
+            src += EB_VIEWPORT_WIDTH;
+        }
+    }
+}
 
 void platform_video_end_frame(void) {
     u16 fbw = 0, fbh = 0;
@@ -114,6 +197,11 @@ void platform_video_end_frame(void) {
             src += EB_VIEWPORT_WIDTH;
         }
     }
+
+    /* Stage 1: mirror the battle command menu. Skipped while the debug console
+     * owns the bottom screen (different pixel format). */
+    if (!platform_console_logging)
+        mirror_window_to_bottom(WINDOW_COMMAND_MENU);
 
     blit_ticks_acc += svcGetSystemTick() - t0;
     if (++blit_frames >= 60 && !platform_console_logging) {

@@ -13,39 +13,38 @@ extern bool platform_console_logging;
  * port/unix/main.c, minus CLI args and the verify/selftest paths.
  */
 int main(void) {
+    /* Launch-time options, read before video init because the bottom screen is
+     * set up differently for each:
+     *   SELECT — boot straight to the overworld (the desktop --skip-intro path)
+     *   L      — give the bottom screen to a console carrying the engine's
+     *            LOG_WARN stream, instead of the UI mirror. verbose_level is
+     *            already 1, so those warnings have been firing into a stderr
+     *            with no sink on this platform; they cover unhandled script
+     *            callbacks, unknown banks and unimplemented opcodes, which is
+     *            what to read when a scripted scene misbehaves.
+     *
+     * Not raising verbose_level to 2 here: that enables LOG_TRACE, which
+     * includes per-entity, per-frame sprite tracing in callbacks.c — it floods
+     * the console and drops the frame rate to single digits. Targeted
+     * diagnostics get their own compile-time gate (e.g. EB_DEBUG_DOORS). */
+    hidScanInput();
+    u32 launch_keys = hidKeysHeld();
+    if (launch_keys & KEY_SELECT)
+        platform_skip_intro = true;
+    if (launch_keys & KEY_L)
+        platform_console_logging = true;
+
     platform_video_init();
     platform_input_init();
     platform_save_init();
     platform_timer_init();
 
-    /* Launch-time options, read once before the game starts:
-     *   SELECT — boot straight to the overworld (the desktop --skip-intro path)
-     *   L      — route the engine's LOG_WARN stream to the bottom-screen
-     *            console. verbose_level is already 1, so those warnings have
-     *            been firing into a stderr with no sink on this platform;
-     *            they cover unhandled script callbacks, unknown banks and
-     *            unimplemented opcodes, which is what to read when a scripted
-     *            scene misbehaves. Off by default: it is chatty and costs a
-     *            console write per warning. */
-    hidScanInput();
-    {
-        u32 launch_keys = hidKeysHeld();
-        if (launch_keys & KEY_SELECT)
-            platform_skip_intro = true;
-        if (launch_keys & KEY_L) {
-            consoleDebugInit(debugDevice_CONSOLE);
-            platform_console_logging = true;
-            /* Leave verbose_level at its default 1 (LOG_WARN). Raising it to 2
-             * enables LOG_TRACE, which includes per-entity, per-frame sprite
-             * tracing in callbacks.c — that floods the console and drops the
-             * frame rate to single digits. Targeted diagnostics get their own
-             * compile-time gate instead (e.g. EB_DEBUG_DOORS).
-             *
-             * Confirm on screen that it armed: without this, "nothing printed"
-             * is ambiguous between the key not being read at launch and the
-             * log simply having nothing to say. */
-            printf("log: on\n");
-        }
+    if (platform_console_logging) {
+        consoleDebugInit(debugDevice_CONSOLE);
+        /* Confirm on screen that it armed: without this, "nothing printed" is
+         * ambiguous between the key not being read at launch and the log
+         * simply having nothing to say. */
+        printf("log: on\n");
     }
 
     game_init();
