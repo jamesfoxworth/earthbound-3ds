@@ -32,6 +32,12 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src
 target_compile_definitions(earthbound_game PUBLIC EB_PIXEL_RGB565=1)
 target_compile_definitions(earthbound_game PRIVATE EB_PPU_FORCE_SPEED_OPT=1)
 
+# Allow one dropped render frame when behind schedule, so an occasional
+# over-budget frame costs a dropped frame instead of slowing the game down.
+# A frame that overruns presents two vblanks late, so recovering one period
+# is enough. Logic still runs every frame.
+target_compile_definitions(earthbound_game PRIVATE EB_MAX_FRAME_SKIP=1)
+
 file(GLOB PLATFORM_SOURCES "platform/*.c")
 
 add_executable(earthbound_3ds
