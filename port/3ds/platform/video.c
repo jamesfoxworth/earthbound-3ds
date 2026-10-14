@@ -1,21 +1,41 @@
 #include "platform/platform.h"
 #include <3ds.h>
+#include <string.h>
 
 /*
- * Milestone 1: native SNES viewport (EB_VIEWPORT_WIDTH/HEIGHT = 256x224),
- * centered on the physical 400x240 top screen. No scaling, no widescreen
- * fill, no stereo 3D, no bottom-screen use yet.
+ * Milestone 1: native SNES viewport (EB_VIEWPORT_WIDTH/HEIGHT = 256x224)
+ * centered on the physical 400x240 top screen. No widescreen fill, stereo
+ * 3D, or bottom-screen use yet.
+ *
+ * Scanlines are accumulated into a linear row-major staging buffer (cheap
+ * sequential writes, stays cached), then transposed into the screen
+ * framebuffer in a single pass at end_frame. The 3DS framebuffer is stored
+ * column-major with Y flipped (the LCD panel is mounted in portrait), so
+ * writing it directly from send_scanline() meant every consecutive pixel
+ * landed a full column apart — one cache line per pixel, ~57k scattered
+ * writes per frame. The transpose pass below instead walks the destination
+ * contiguously (one full column per inner loop) and takes the strided
+ * access on the small cached source buffer.
  */
+
 #define PHYS_WIDTH  400
 #define PHYS_HEIGHT 240
-#define OFFSET_X ((PHYS_WIDTH  - EB_VIEWPORT_WIDTH)  / 2)
-#define OFFSET_Y ((PHYS_HEIGHT - EB_VIEWPORT_HEIGHT) / 2)
+
+static pixel_t frame[EB_VIEWPORT_WIDTH * EB_VIEWPORT_HEIGHT];
 
 bool platform_video_init(void) {
     gfxInitDefault();
+    /* gfxInitDefault() allocates BGR8 (3 bytes/pixel); the game renders
+     * 16-bit pixels, so switch the top screen to RGB565. The matching
+     * channel order comes from building the game library with
+     * EB_PIXEL_RGB565=1 (see core/types.h). */
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
+
+    /* New 3DS runs homebrew at the old 268MHz clock unless the app opts in.
+     * No-op on an original 3DS. */
+    osSetSpeedupEnable(true);
     return true;
 }
 
@@ -24,32 +44,42 @@ void platform_video_shutdown(void) {
 }
 
 void platform_video_begin_frame(void) {
-    /* Nothing to prepare — scanlines are written directly into the current
-     * back buffer by send_scanline() below. */
+    /* Scanlines land in the staging buffer; nothing to prepare. */
 }
 
-/*
- * The 3DS top-screen framebuffer is physically rotated: the LCD panel is
- * mounted in portrait orientation, so buffer memory is column-major with Y
- * flipped relative to normal screen coordinates. Pixel (x, y) lives at:
- *   offset = x * PHYS_HEIGHT + (PHYS_HEIGHT - 1 - y)
- * This is the standard libctru direct-framebuffer convention (see
- * devkitPro's camera/video example for the same transform).
- */
 void platform_video_send_scanline(int y, const pixel_t *pixels) {
-    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    int row = PHYS_HEIGHT - 1 - (OFFSET_Y + y);
-    for (int x = 0; x < EB_VIEWPORT_WIDTH; x++) {
-        int col = OFFSET_X + x;
-        fb[col * PHYS_HEIGHT + row] = pixels[x];
-    }
+    if (y < 0 || y >= EB_VIEWPORT_HEIGHT)
+        return;
+    memcpy(&frame[y * EB_VIEWPORT_WIDTH], pixels, EB_VIEWPORT_WIDTH * sizeof(pixel_t));
 }
 
 pixel_t *platform_video_get_framebuffer(void) {
-    return NULL; /* streaming target: no full-frame pointer to hand back */
+    return frame;
 }
 
 void platform_video_end_frame(void) {
+    u16 fbw = 0, fbh = 0;
+    /* Reported dimensions are in framebuffer space: fbw is the panel's short
+     * axis (240), fbh its long axis (400). Use them rather than assuming, so
+     * a stride change can't silently garble the image. */
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fbw, &fbh);
+    if (!fb)
+        return;
+
+    const int off_x = (PHYS_WIDTH  - EB_VIEWPORT_WIDTH)  / 2;
+    const int off_y = (PHYS_HEIGHT - EB_VIEWPORT_HEIGHT) / 2;
+
+    for (int x = 0; x < EB_VIEWPORT_WIDTH; x++) {
+        /* Destination column (off_x + x), walked bottom-to-top because the
+         * framebuffer's Y axis is flipped relative to screen coordinates. */
+        u16 *dst = &fb[(size_t)(off_x + x) * fbw + (fbw - 1 - off_y)];
+        const pixel_t *src = &frame[x];
+        for (int y = 0; y < EB_VIEWPORT_HEIGHT; y++) {
+            *dst-- = *src;
+            src += EB_VIEWPORT_WIDTH;
+        }
+    }
+
     gfxFlushBuffers();
     gspWaitForVBlank();
     gfxSwapBuffers();

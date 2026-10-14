@@ -19,6 +19,16 @@ set(EB_ENABLE_AUDIO OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src
                  ${CMAKE_CURRENT_BINARY_DIR}/game_lib)
 
+# The 3DS top screen is configured as GSP_RGB565_OES, so build the game
+# library's pixel construction (palette conversion, PIXEL_RGB) in RGB565
+# channel order instead of the default BGR565 — otherwise red and blue are
+# swapped. See the EB_PIXEL_RGB565 note in src/core/types.h.
+#
+# EB_PPU_FORCE_SPEED_OPT builds the software PPU renderer at -O3 rather than
+# the toolchain default -O2, as the RP2040 port does.
+target_compile_definitions(earthbound_game PUBLIC EB_PIXEL_RGB565=1)
+target_compile_definitions(earthbound_game PRIVATE EB_PPU_FORCE_SPEED_OPT=1)
+
 file(GLOB PLATFORM_SOURCES "platform/*.c")
 
 add_executable(earthbound_3ds

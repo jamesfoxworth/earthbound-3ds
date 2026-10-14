@@ -52,8 +52,11 @@ void platform_input_poll(void) {
     if (held & KEY_RIGHT)  p |= PAD_RIGHT;
     pad_state = p;
 
-    /* No debug hotkeys mapped yet (milestone 1) — aux stays empty. */
-    aux_state = 0;
+    /* Touching the bottom screen toggles the FPS/profiling overlay (the
+     * desktop port's F3). Reported as a raw level; game_main.c does the edge
+     * detection and toggling centrally, so one tap is one toggle. Chosen over
+     * ZL/ZR because those only exist on New 3DS. */
+    aux_state = (held & KEY_TOUCH) ? AUX_FPS_TOGGLE : 0;
 }
 
 uint16_t platform_input_get_pad(void) {
