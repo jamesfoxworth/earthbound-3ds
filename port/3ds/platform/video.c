@@ -68,8 +68,22 @@ pixel_t *platform_video_get_framebuffer(void) {
     return frame;
 }
 
+/* Diagnostic: when set, end_frame skips the transpose. The PPU row of the
+ * profiling overlay times begin_frame + ppu_render_frame + end_frame, so the
+ * drop in that number while this is held is the transpose's share of the
+ * frame — the figure that decides whether presentation is worth moving onto
+ * the GPU. The screen keeps whatever was last presented while held. */
+bool platform_video_skip_blit;
+
 void platform_video_end_frame(void) {
     u16 fbw = 0, fbh = 0;
+
+    if (platform_video_skip_blit) {
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+        return;
+    }
+
     /* Reported dimensions are in framebuffer space: fbw is the panel's short
      * axis (240), fbh its long axis (400). Use them rather than assuming, so
      * a stride change can't silently garble the image. */
