@@ -35,8 +35,13 @@ bool platform_video_init(void) {
     gfxSetDoubleBuffering(GFX_TOP, true);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
-    /* Debug console on the otherwise unused bottom screen. */
+    /* Debug console on the otherwise unused bottom screen. stderr is swallowed
+     * by default: verbose_level is already 1, so the engine's LOG_WARN stream
+     * (unhandled callbacks, unknown script banks, unimplemented opcodes) is
+     * live but has had no sink on this platform. main.c routes it here when
+     * launched with L held. */
     consoleInit(GFX_BOTTOM, NULL);
+    consoleDebugInit(debugDevice_NULL);
 
     /* Only the centered 256x224 region is drawn each frame, so clear both
      * buffers once — otherwise the surrounding letterbox is uninitialized
@@ -81,6 +86,10 @@ pixel_t *platform_video_get_framebuffer(void) {
 static uint64_t blit_ticks_acc;
 static int blit_frames;
 
+/* Set when LOG_WARN output owns the console, so the readout below does not
+ * fight it for the same screen. */
+bool platform_console_logging;
+
 void platform_video_end_frame(void) {
     u16 fbw = 0, fbh = 0;
     uint64_t t0 = svcGetSystemTick();
@@ -107,7 +116,7 @@ void platform_video_end_frame(void) {
     }
 
     blit_ticks_acc += svcGetSystemTick() - t0;
-    if (++blit_frames >= 60) {
+    if (++blit_frames >= 60 && !platform_console_logging) {
         uint32_t usec = (uint32_t)(blit_ticks_acc / blit_frames
                                    / (SYSCLOCK_ARM11 / 1000000));
         /* Home the cursor so the figure updates in place. */

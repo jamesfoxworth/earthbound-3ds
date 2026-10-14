@@ -2,6 +2,9 @@
 #include "game_main.h"
 #include <3ds.h>
 
+/* Defined in platform/video.c */
+extern bool platform_console_logging;
+
 /*
  * Single top-level game loop: advance the game one frame (game_loop_step),
  * then perform the one per-frame host yield (host_process_frame), then let
@@ -14,14 +17,25 @@ int main(void) {
     platform_save_init();
     platform_timer_init();
 
-    /* Hold SELECT at launch to boot straight to the overworld, the same path
-     * the desktop port's --skip-intro takes. Useful while the intro sequence
-     * is hard to get out of: attract mode only checks for a button in its
-     * AT_MAIN phase, and each scene runs as a child mode that holds the
-     * stack for the scene's duration. */
+    /* Launch-time options, read once before the game starts:
+     *   SELECT — boot straight to the overworld (the desktop --skip-intro path)
+     *   L      — route the engine's LOG_WARN stream to the bottom-screen
+     *            console. verbose_level is already 1, so those warnings have
+     *            been firing into a stderr with no sink on this platform;
+     *            they cover unhandled script callbacks, unknown banks and
+     *            unimplemented opcodes, which is what to read when a scripted
+     *            scene misbehaves. Off by default: it is chatty and costs a
+     *            console write per warning. */
     hidScanInput();
-    if (hidKeysHeld() & KEY_SELECT)
-        platform_skip_intro = true;
+    {
+        u32 launch_keys = hidKeysHeld();
+        if (launch_keys & KEY_SELECT)
+            platform_skip_intro = true;
+        if (launch_keys & KEY_L) {
+            consoleDebugInit(debugDevice_CONSOLE);
+            platform_console_logging = true;
+        }
+    }
 
     game_init();
 
