@@ -1,5 +1,6 @@
 #include "platform/platform.h"
 #include "game_main.h"
+#include <3ds.h>
 
 /*
  * Single top-level game loop: advance the game one frame (game_loop_step),
@@ -12,6 +13,15 @@ int main(void) {
     platform_input_init();
     platform_save_init();
     platform_timer_init();
+
+    /* Hold SELECT at launch to boot straight to the overworld, the same path
+     * the desktop port's --skip-intro takes. Useful while the intro sequence
+     * is hard to get out of: attract mode only checks for a button in its
+     * AT_MAIN phase, and each scene runs as a child mode that holds the
+     * stack for the scene's duration. */
+    hidScanInput();
+    if (hidKeysHeld() & KEY_SELECT)
+        platform_skip_intro = true;
 
     game_init();
 
