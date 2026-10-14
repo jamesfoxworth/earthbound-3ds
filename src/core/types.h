@@ -51,7 +51,9 @@
  * pixel_t (blend_colors, pixel_apply_brightness) are bit-position symmetric
  * and work for either layout unchanged — green stays at bits [10:5] in both.
  *
- * Cost of the toggle: a one-time tweak of bgr555_to_pixel() and PIXEL_RGB();
+ * Cost of the toggle: a one-time tweak of bgr555_to_pixel(), PIXEL_RGB() and
+ * the colour-math fixed colour in ppu_render.c (which places named R/G/B
+ * values from COLDATA at fixed bit positions, so it is not symmetric);
  * the per-frame palette shadow (ppu_render.c::cgram_render) carries the chosen
  * layout into every downstream pixel for free, saving the port a per-pixel
  * swap in send_scanline().

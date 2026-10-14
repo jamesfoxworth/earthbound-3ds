@@ -1436,9 +1436,22 @@ void PPU_HOT_FUNC(ppu_render_frame_ex)(int ctx_id, int y_start, int y_end,
     bool subtract_mode = (ppu.cgadsub & 0x80) != 0;
     bool half_math = (ppu.cgadsub & 0x40) != 0;
     /* Fixed color for color math — convert directly to BGR565 */
+    /* The colour-math fixed colour has to be built in the same channel order
+     * as pixel_t. Unlike the blend helpers — which extract and reinsert at
+     * identical bit positions and so work for either layout — this takes the
+     * named R/G/B values straight from the COLDATA register, so the layout
+     * matters: in RGB565 red sits high and blue low, the reverse of BGR565.
+     * Getting it backwards swaps red and blue in everything blended against
+     * it, which on a semi-transparent window reads as the wrong border hue. */
+#ifdef EB_PIXEL_RGB565
+    uint16_t fixed_color = ((uint16_t)ppu.coldata_r << 11) |
+                           ((uint16_t)ppu.coldata_g << 6) |
+                           ((uint16_t)ppu.coldata_b);
+#else
     uint16_t fixed_color = (uint16_t)ppu.coldata_r |
                            ((uint16_t)ppu.coldata_g << 6) |
                            ((uint16_t)ppu.coldata_b << 11);
+#endif
 
     /* Which layers need rendering (union of main + sub screen) */
     uint8_t layers_needed = ppu.tm | ppu.ts;
