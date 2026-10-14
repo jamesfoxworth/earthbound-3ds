@@ -92,9 +92,58 @@ static size_t dialogue_blob_size = 0;
 static const uint8_t *status_window_text_data;
 static size_t   status_window_text_size;
 
-/* Dormant CC 0x15-0x17 dictionary base — prefix substitution is not yet wired up,
- * so ScriptReader::prefix_off is always -1 and this stays NULL. */
+/* Base of the stream script_read_byte() drains before the main script. Built
+ * for the CC 0x15-0x17 dictionary (still unused); queue_text_prefix() now also
+ * uses it to feed names through the typewriter. */
 static const uint8_t *text_prefix_base = NULL;
+
+/* Scratch for queue_text_prefix(). Sized for the longest field fed through it
+ * (battle attacker/target names, 80 bytes) plus a terminator. */
+static uint8_t text_prefix_buf[96];
+
+/* Feed an EB-encoded string into the prefix stream so the main text loop
+ * prints it one character at a time, with the same per-character delay and
+ * print sound as the surrounding dialogue.
+ *
+ * The original routines reach PRINT_LETTER (print_string.asm:25, and the
+ * wordwrap variant via REDIRECT_PRINT_STRING), so names type out in the real
+ * game. print_string()/print_string_with_wordwrap() in this port render
+ * synchronously instead, because the typewriter effect has to yield once per
+ * character and those are plain calls. Routing through the reader gets the
+ * timing without making every caller yield-aware — and only callers that have
+ * a ScriptReader are affected, so menu and battle-UI name rendering stays
+ * immediate, as it should.
+ *
+ * Returns false if the string is empty or a prefix is already draining; the
+ * caller then prints it the old way rather than dropping it. */
+bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
+    if (!r || !data || max_len <= 0)
+        return false;
+    if (r->prefix_off >= 0)
+        return false;  /* already draining one; don't clobber it */
+
+    int n = max_len;
+    if (n > (int)sizeof(text_prefix_buf) - 1)
+        n = (int)sizeof(text_prefix_buf) - 1;
+    for (int i = 0; i < n; i++) {
+        if (data[i] == 0x00) {
+            n = i;
+            break;
+        }
+    }
+    /* Name fields are fixed-width and space-padded. Typing the padding would
+     * print real spaces and could wrap the line. */
+    while (n > 0 && data[n - 1] == 0x50)  /* CHAR::SPACE */
+        n--;
+    if (n == 0)
+        return false;
+
+    memcpy(text_prefix_buf, data, (size_t)n);
+    text_prefix_buf[n] = 0x00;  /* script_read_byte() ends the prefix here */
+    text_prefix_base = text_prefix_buf;
+    r->prefix_off = 0;
+    return true;
+}
 
 /* Map a TextSource tag back to its live asset base pointer. Readers are offset-
  * based (no raw pointers in ScriptReader) so they survive a save/reload; the base

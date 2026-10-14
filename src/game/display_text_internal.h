@@ -22,6 +22,13 @@ uint32_t script_read_dword(ScriptReader *r);
 void script_skip(ScriptReader *r, int n);
 void resolve_text_jump(ScriptReader *r, uint32_t addr);
 
+/* Queue an EB-encoded string ahead of the main script so the text loop types
+ * it out character by character (the original PRINT_STRING routines reach
+ * PRINT_LETTER, so names are not instant). Trailing space padding is trimmed.
+ * Returns false when there is nothing to queue or a prefix is already
+ * draining, in which case print it directly instead. */
+bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len);
+
 /* ---- Data helpers (display_text.c) ---- */
 void toggle_hppp_flipout_mode(uint16_t enable);
 uint16_t is_escargo_express_full(void);

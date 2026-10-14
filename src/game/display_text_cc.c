@@ -2515,12 +2515,17 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
             name_max = 6;
         }
         if (name_data) {
-            if (dt.allow_text_overflow) {
-                int len = 0;
-                while (len < name_max && name_data[len] != 0x00) len++;
-                print_eb_string(name_data, len);
-            } else {
-                print_string_with_wordwrap(name_data, (int16_t)name_max);
+            /* Both assembly paths reach PRINT_LETTER, so the name types out
+             * with the rest of the line; queue it rather than printing it
+             * synchronously. */
+            if (!queue_text_prefix(r, name_data, name_max)) {
+                if (dt.allow_text_overflow) {
+                    int len = 0;
+                    while (len < name_max && name_data[len] != 0x00) len++;
+                    print_eb_string(name_data, len);
+                } else {
+                    print_string_with_wordwrap(name_data, (int16_t)name_max);
+                }
             }
         }
         break;
@@ -2557,7 +2562,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         uint16_t item_id = arg ? (uint16_t)arg : (uint16_t)(get_argument_memory() & 0xFFFF);
         const ItemConfig *entry = get_item_entry(item_id);
         if (entry) {
-            print_text_with_word_splitting(entry->name, ITEM_NAME_LEN);
+            if (!queue_text_prefix(r, entry->name, ITEM_NAME_LEN))
+                print_text_with_word_splitting(entry->name, ITEM_NAME_LEN);
         }
         break;
     }
@@ -2571,7 +2577,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         if (dest_id < PSI_TELEPORT_DEST_MAX_ENTRIES) {
             const uint8_t *entry = psi_teleport_dest_data +
                                    (uint32_t)dest_id * PSI_TELEPORT_DEST_ENTRY_SIZE;
-            print_string_with_wordwrap(entry, PSI_TELEPORT_DEST_NAME_LEN);
+            if (!queue_text_prefix(r, entry, PSI_TELEPORT_DEST_NAME_LEN))
+                print_string_with_wordwrap(entry, PSI_TELEPORT_DEST_NAME_LEN);
         }
         break;
     }
@@ -2651,7 +2658,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         print_enemy_article(0);  /* USA only: conditional article */
         char *attacker_name = return_battle_attacker_address();
         /* Assembly: PRINT_STRING_WITH_WORDWRAP with max_len=80 */
-        if (attacker_name[0] != '\0')
+        if (attacker_name[0] != '\0' &&
+            !queue_text_prefix(r, (const uint8_t *)attacker_name, BATTLE_NAME_ATTACKER_SIZE))
             print_string_with_wordwrap((const uint8_t *)attacker_name, BATTLE_NAME_ATTACKER_SIZE);
         break;
     }
@@ -2662,7 +2670,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         print_enemy_article(1);  /* USA only: conditional article */
         char *target_name = return_battle_target_address();
         /* Assembly: PRINT_STRING_WITH_WORDWRAP with max_len=80 */
-        if (target_name[0] != '\0')
+        if (target_name[0] != '\0' &&
+            !queue_text_prefix(r, (const uint8_t *)target_name, BATTLE_NAME_TARGET_SIZE))
             print_string_with_wordwrap((const uint8_t *)target_name, BATTLE_NAME_TARGET_SIZE);
         break;
     }
