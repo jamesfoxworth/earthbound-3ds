@@ -35,7 +35,13 @@ def _collect_assets(manifest_path: Path, bin_dir: Path, custom_dir: Path) -> dic
     assets: dict[str, Path] = {}
 
     for line in manifest_path.read_text().splitlines():
-        rel_path = line.strip()
+        # Normalize to posix separators so manifest-derived keys match the
+        # custom_dir override keys below (.as_posix()) on Windows, where the
+        # manifest was written with backslash-separated paths. Without this,
+        # the same logical asset gets two dict entries (one per separator
+        # style) instead of the override replacing the original, producing
+        # duplicate enum declarations in the generated asset_ids.h.
+        rel_path = line.strip().replace("\\", "/")
         if not rel_path:
             continue
         full_path = bin_dir / rel_path
