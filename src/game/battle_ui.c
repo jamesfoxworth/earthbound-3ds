@@ -726,6 +726,12 @@ void apply_letterbox_to_ppu(void);
  *   letterbox_style: 0=none, 1=large, 2=medium, 3=small; bit 2 = 4bpp layer 2
  */
 void load_battle_bg(uint16_t layer1_id, uint16_t layer2_id, uint16_t letterbox_style) {
+#ifdef EB_NO_BATTLE_LETTERBOX
+    /* EarthBound letterboxes the battle scene on purpose, masking layers off
+     * on the top and bottom scanlines. A port with the UI on a second screen
+     * has the room to show the whole scene instead, so drop the bands. */
+    letterbox_style = 0;
+#endif
     /* BG1/BG2 (battle backgrounds) should fill the viewport with wrapping.
      * Sprite Y offset centers SNES-coordinate sprites vertically. */
     ppu.bg_viewport_fill[0] = BG_VIEWPORT_FILL;

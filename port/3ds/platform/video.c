@@ -393,7 +393,7 @@ static const WindowInfo *routed_menu_window(void) {
  * where the backdrop is least likely to have a combatant in it -- and repeat
  * it down the screen. */
 static void draw_battle_backdrop(void) {
-    const int src_y = EB_VIEWPORT_HEIGHT - 4;
+    const int src_y = EB_VIEWPORT_HEIGHT * 3 / 4;
     const int src_x0 = (EB_VIEWPORT_WIDTH - BOTTOM_WIDTH) / 2;
 
     for (int x = 0; x < BOTTOM_WIDTH; x++) {
@@ -527,22 +527,56 @@ void platform_video_end_frame(void) {
     suppress_restore();
 
     if (!platform_console_logging) {
-        /* Switching between the battle layout and the overworld panel leaves
-         * the previous context's pixels behind, since elements only clear
-         * their own rectangles. Wipe the image on the transition. */
         static int last_context = -1;
+        static uint32_t last_sig;
+        static int present_left;
+
         int context = ow.battle_mode ? 1 : 0;
         if (context != last_context) {
+            /* Elements only clear their own rectangles, so the previous
+             * context's pixels would otherwise survive underneath. */
             memset(bottom_img, 0, sizeof(bottom_img));
             last_context = context;
+            last_sig = 0;
+            present_left = 2;
         }
 
-        if (context)
+        if (context) {
+            /* The battle backdrop and panels animate, so rebuild every frame. */
             draw_battle_bottom();
-        else
-            draw_bottom_panel();
+            present_left = 1;
+        } else {
+            /* The overworld panel is static between stat changes. Composing
+             * and blitting 320x240 twice over every frame cost more than the
+             * overworld's whole headroom -- it dropped the frame rate into the
+             * mid 40s -- so only redraw when something it shows has changed.
+             * Both buffers need the new image, hence two presents. */
+            uint32_t sig = 2166136261u;
+            int count = game_state.player_controlled_party_count;
+            sig = (sig ^ (uint32_t)count) * 16777619u;
+            for (int i = 0; i < count && i < 4; i++) {
+                uint8_t id = game_state.player_controlled_party_members[i];
+                if (id >= TOTAL_PARTY_COUNT)
+                    continue;
+                const CharStruct *ch = &party_characters[id];
+                uint32_t vals[4] = { ch->current_hp, ch->max_hp,
+                                     ch->current_pp, ch->max_pp };
+                for (int v = 0; v < 4; v++)
+                    sig = (sig ^ vals[v]) * 16777619u;
+                for (int c = 0; c < 5; c++)
+                    sig = (sig ^ ch->name[c]) * 16777619u;
+            }
+            if (sig != last_sig) {
+                last_sig = sig;
+                draw_bottom_panel();
+                present_left = 2;
+            }
+        }
 
-        present_bottom();
+        if (present_left > 0) {
+            present_bottom();
+            present_left--;
+        }
     }
 
     /* Palette readout, console mode only: the BG sub-palettes the PPU actually
