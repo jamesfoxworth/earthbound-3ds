@@ -44,6 +44,10 @@ target_compile_definitions(earthbound_game PRIVATE EB_MAX_FRAME_SKIP=1)
 # distinct door event, visible with the L launch option. Remove once resolved.
 target_compile_definitions(earthbound_game PRIVATE EB_DEBUG_DOORS=1)
 
+# Temporary: report what each queued name hands the typewriter, while the
+# names-jumping report is unresolved. Visible with the L launch option.
+target_compile_definitions(earthbound_game PRIVATE EB_DEBUG_NAMES=1)
+
 file(GLOB PLATFORM_SOURCES "platform/*.c")
 
 add_executable(earthbound_3ds

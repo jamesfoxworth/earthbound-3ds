@@ -114,17 +114,39 @@ static uint8_t text_prefix_buf[96];
  * a ScriptReader are affected, so menu and battle-UI name rendering stays
  * immediate, as it should.
  *
- * Returns false if the string is empty or a prefix is already draining; the
- * caller then prints it the old way rather than dropping it. */
+ * A second name can be queued while the first is still draining -- "Pokey used
+ * Ness as a shield!" queues the target before the attacker's terminator has
+ * been read -- so the new text is APPENDED to what is left rather than
+ * refused. Refusing sent the caller down print_string_with_wordwrap(), which
+ * renders synchronously, so that name appeared all at once while the rest of
+ * the line typed normally.
+ *
+ * Returns false only if there is nothing printable to queue; the caller then
+ * prints it the old way rather than dropping it. */
 bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
     if (!r || !data || max_len <= 0)
         return false;
-    if (r->prefix_off >= 0)
-        return false;  /* already draining one; don't clobber it */
+
+    /* Bytes of an in-flight prefix the reader has not consumed yet. */
+    int carry = 0;
+    if (r->prefix_off >= 0 && text_prefix_base == text_prefix_buf) {
+        while (text_prefix_buf[r->prefix_off + carry] != 0x00 &&
+               r->prefix_off + carry < (int)sizeof(text_prefix_buf) - 1)
+            carry++;
+    } else if (r->prefix_off >= 0) {
+        /* Draining a buffer we do not own (the CC 0x15-0x17 dictionary); leave
+         * it alone and let the caller print immediately, as before. */
+#ifdef EB_DEBUG_NAMES
+        LOG_WARN("name: FALLBACK foreign-prefix (prints instantly)\n");
+#endif
+        return false;
+    }
 
     int n = max_len;
-    if (n > (int)sizeof(text_prefix_buf) - 1)
-        n = (int)sizeof(text_prefix_buf) - 1;
+    if (n > (int)sizeof(text_prefix_buf) - 1 - carry)
+        n = (int)sizeof(text_prefix_buf) - 1 - carry;
+    if (n <= 0)
+        return false;
     /* Stop at the first byte that is not printable EB text. 0x50 is the base
      * the font is indexed from (glyph = ch - 0x50), so anything below it is a
      * terminator, a control code, or padding in a different encoding -- the
@@ -142,19 +164,31 @@ bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
      * print real spaces and could wrap the line. */
     while (n > 0 && data[n - 1] == 0x50)  /* CHAR::SPACE */
         n--;
-    if (n == 0)
+    if (n == 0) {
+#ifdef EB_DEBUG_NAMES
+        LOG_WARN("name: FALLBACK empty-after-trim max=%d [%02X %02X]\n",
+                 max_len, data[0], (max_len > 1) ? data[1] : 0);
+#endif
         return false;
+    }
 
     /* Decide the line break up front, the way print_string_with_wordwrap()
      * did. Feeding the name through the typewriter otherwise defers the
      * decision to its first character, so the line re-flows after some of the
      * surrounding text has already been laid out -- which reads as the text
      * jumping around mid-sentence. */
+    /* Compact any un-drained remainder to the front, then append after it, so
+     * the reader sees carry-then-new as one continuous stream. */
+    if (carry > 0)
+        memmove(text_prefix_buf, text_prefix_buf + r->prefix_off, (size_t)carry);
+
     WindowInfo *w = get_focus_window_info();
     if (w && win.current_focus_window != WINDOW_ID_NONE && dt.enable_word_wrap) {
         uint16_t width = 0;
-        for (int i = 0; i < n; i++) {
-            uint8_t ch = data[i];
+        /* Measure carry and new text together: the carry has been queued but
+         * not yet printed, so the cursor has not moved past it. */
+        for (int i = 0; i < carry + n; i++) {
+            uint8_t ch = (i < carry) ? text_prefix_buf[i] : data[i - carry];
             if (ch == 0x2F)
                 width += 8;
             else
@@ -170,13 +204,26 @@ bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
         }
     }
 
-    memcpy(text_prefix_buf, data, (size_t)n);
-    text_prefix_buf[n] = 0x00;  /* script_read_byte() ends the prefix here */
+#ifdef EB_DEBUG_NAMES
+    /* What actually reaches the typewriter: the byte values decide whether
+     * this is EB text at all, and n is how many glyphs will be typed. A name
+     * that prints as a handful of characters but reports a large n is padding
+     * being typed out. */
+    LOG_WARN("name: n=%d max=%d carry=%d [%02X %02X %02X %02X %02X %02X %02X %02X]\n",
+             n, max_len, carry,
+             data[0], (max_len > 1) ? data[1] : 0, (max_len > 2) ? data[2] : 0,
+             (max_len > 3) ? data[3] : 0, (max_len > 4) ? data[4] : 0,
+             (max_len > 5) ? data[5] : 0, (max_len > 6) ? data[6] : 0,
+             (max_len > 7) ? data[7] : 0);
+#endif
+
+    memcpy(text_prefix_buf + carry, data, (size_t)n);
+    text_prefix_buf[carry + n] = 0x00;  /* script_read_byte() ends the prefix here */
     text_prefix_base = text_prefix_buf;
     r->prefix_off = 0;
     /* Already measured as one word, so the main loop must not re-check and
      * break the name part-way through. */
-    dt.upcoming_word_length = (uint16_t)n;
+    dt.upcoming_word_length = (uint16_t)(carry + n);
     return true;
 }
 
