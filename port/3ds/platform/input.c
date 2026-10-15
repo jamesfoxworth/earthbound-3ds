@@ -18,8 +18,8 @@ static TouchState touch;
 
 const TouchState *touch_get(void) { return &touch; }
 
-static bool fps_toggle_pulse;
-void input_pulse_fps_toggle(void) { fps_toggle_pulse = true; }
+static uint16_t aux_pulse;
+void input_pulse_aux(uint16_t bits) { aux_pulse |= bits; }
 
 static uint16_t pad_pulse;
 void input_pulse_pad(uint16_t bits) { pad_pulse |= bits; }
@@ -98,10 +98,8 @@ void platform_input_poll(void) {
      * invisible corner patch. It lives in the options panel now, which
      * raises a one-frame pulse here; game_main.c edge-detects the level, so
      * one pulse is one toggle. */
-    if (fps_toggle_pulse) {
-        aux_state |= AUX_FPS_TOGGLE;
-        fps_toggle_pulse = false;
-    }
+    aux_state |= aux_pulse;
+    aux_pulse = 0;
 }
 
 uint16_t platform_input_get_pad(void) {

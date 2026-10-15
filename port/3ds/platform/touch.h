@@ -21,10 +21,10 @@ typedef struct {
 
 const TouchState *touch_get(void);
 
-/* One-shot FPS/profiling overlay toggle, raised by the options panel.
- * game_main.c edge-detects AUX_FPS_TOGGLE, so a single-frame pulse is one
- * toggle. */
-void input_pulse_fps_toggle(void);
+/* Raise AUX_* bits for exactly one poll. game_main.c edge-detects the aux
+ * level, so a single-frame pulse is one action -- the same path the desktop
+ * port's F3/F6/F7 keys take. */
+void input_pulse_aux(uint16_t bits);
 
 /* Inject a one-frame pad press. The game edge-detects into core.pad1_pressed,
  * so this is indistinguishable from the player pressing the button -- which is

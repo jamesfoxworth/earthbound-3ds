@@ -609,6 +609,31 @@ static int draw_label_box(const char *label, bool active, int x, int dest_y) {
 /* Settings entry. Not interactive yet -- touch input still has to be put
  * back -- so this is the placeholder the hub will hang off. */
 static int settings_hit_x, settings_hit_y, settings_hit_w, settings_hit_h;
+static int sstate_hit_x, sstate_hit_y, sstate_hit_w, sstate_hit_h;
+
+/* Quick save-state button. Tap writes a state through the same AUX bit the
+ * desktop port's F6 raises; Load state lives in the options panel rather than
+ * on an icon, because a mis-tap there would throw away progress. */
+static int draw_savestate_box(int right_x, int dest_y) {
+    const int tiles_w = 4;
+    const int box_w = tiles_w * 8;
+    int x = right_x - box_w;
+    sstate_hit_x = x; sstate_hit_y = dest_y;
+    sstate_hit_w = box_w; sstate_hit_h = MONEY_BOX_H;
+    draw_window_box(tiles_w, MONEY_TILES_H, x, dest_y);
+
+    const pixel_t c = game_text_ink();
+    int cx = x + box_w / 2, cy = dest_y + MONEY_BOX_H / 2;
+    for (int dy = -6; dy <= 6; dy++)
+        for (int dx = -6; dx <= 6; dx++) {
+            bool body  = (dy == -6 || dy == 6 || dx == -6 || dx == 6);
+            bool label = (dy >= 1 && dy <= 5 && dx >= -3 && dx <= 3);
+            bool shut  = (dy >= -5 && dy <= -2 && dx >= -2 && dx <= 2);
+            if (body || label || shut)
+                img_px(cx + dx, cy + dy, c);
+        }
+    return box_w;
+}
 
 static int draw_settings_box(int right_x, int dest_y) {
     const int tiles_w = 4;
@@ -661,12 +686,11 @@ static const char *const view_width_names[]  = { "Wide", "4:3", "Pure" };
 static const int         view_width_values[] = { EB_VIEWPORT_WIDTH, 320, SNES_WIDTH };
 #define VIEW_WIDTH_COUNT ((int)(sizeof(view_width_values) / sizeof(int)))
 
-static bool options_open;
-
 typedef struct {
     const char *label;
-    bool       *flag;    /* bool row, or NULL for a cycle row */
-    int        *cycle;   /* cycle row value */
+    bool       *flag;    /* bool row, or NULL */
+    int        *cycle;   /* cycle row value, or NULL */
+    int         action;  /* OPT_ACT_* for a row that does something on tap */
 } OptionRow;
 
 bool video_opt_fps;
@@ -674,96 +698,95 @@ bool video_opt_fps;
  * inverted when handed to the game, whose flag is a disable. */
 static bool opt_letterbox_on = true;
 
+/* Rows with no value are actions, taken on tap. Save states already work on
+ * this port -- platform/savestate.c is a real SD-card backend -- and the
+ * trigger is the same AUX bit the desktop port's F6/F7 raise, so these only
+ * have to pulse it. */
+enum { OPT_ACT_NONE = 0, OPT_ACT_SAVESTATE, OPT_ACT_LOADSTATE };
+
 static const OptionRow option_rows[] = {
-    { "Screen",      NULL,                   &video_opt_view_width },
-    { "Letterbox",   &opt_letterbox_on,      NULL },
-    { "FPS meter",   &video_opt_fps,         NULL },
+    { "Screen",      NULL,              &video_opt_view_width, OPT_ACT_NONE },
+    { "Letterbox",   &opt_letterbox_on, NULL, OPT_ACT_NONE },
+    { "FPS meter",   &video_opt_fps,    NULL, OPT_ACT_NONE },
+    { "Save state",  NULL,              NULL, OPT_ACT_SAVESTATE },
+    { "Load state",  NULL,              NULL, OPT_ACT_LOADSTATE },
 };
 #define OPTION_ROW_COUNT ((int)(sizeof(option_rows) / sizeof(option_rows[0])))
 
-/* The scratch tilemap draw_window_box() writes is a 32x32 map and
- * draw_tilemap_rect_src() wraps its coordinates with & 31, so a box wider
- * than 32 tiles wraps around and draws a second left border partway across
- * -- which is the stray window edge that appeared at the right. Cap the
- * width, and derive the height from the laid-out content so the last line
- * cannot land past the bottom border. */
-#define OPT_TILES_W  30
-#define OPT_W        (OPT_TILES_W * 8)
-#define OPT_X        ((BOTTOM_WIDTH - OPT_W) / 2)
-#define OPT_ROW_H    22
-#define OPT_LINES    (OPTION_ROW_COUNT + 2)      /* title + options + close */
-#define OPT_PAD_Y    6
-#define OPT_TILES_H  (2 + (OPT_LINES * OPT_ROW_H + 2 * OPT_PAD_Y + 7) / 8)
-#define OPT_H        (OPT_TILES_H * 8)
-#define OPT_Y        ((BOTTOM_HEIGHT - OPT_H) / 2)
-#define OPT_LINE_Y(i) (OPT_Y + 8 + OPT_PAD_Y + (i) * OPT_ROW_H)
+/* Options share the panel's window, so they share its geometry. Two columns,
+ * because five rows down one side of a 120px interior does not fit. */
+#define OPT_COLS   2
+#define OPT_ROWS   ((OPTION_ROW_COUNT + OPT_COLS - 1) / OPT_COLS)
 
-static void draw_options_panel(void) {
-    int prev = font_id_cur;
-    font_id_cur = EB_PANEL_FONT;
-    if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
+/* Option hit rects, filled in as the rows are drawn. */
+static struct { int x, y, w, h; int row; } opt_hit[OPTION_ROW_COUNT];
+static int opt_hit_count;
 
-    draw_window_box(OPT_TILES_W, OPT_TILES_H, OPT_X, OPT_Y);
-
-    font_cell_bg = true;
-    font_cell_bg_c = game_text_back();
+/* Draw the option rows into the panel interior. The caller has already drawn
+ * the window and its title, exactly as it does for Goods and PSI. */
+static void draw_options_rows(int ox, int oy, int inner_w, int line_h,
+                              int rows_fit) {
     const pixel_t ink = game_text_ink();
-    const pixel_t dim = ink;
-    draw_ascii(OPT_X + 10, OPT_LINE_Y(0), "Options", 1, ink);
+    const pixel_t dim = game_text_dim();
+    const int col_w = inner_w / OPT_COLS;
 
+    opt_hit_count = 0;
     for (int i = 0; i < OPTION_ROW_COUNT; i++) {
+        int col = i / rows_fit, r_in = i % rows_fit;
+        if (col >= OPT_COLS) break;
         const OptionRow *r = &option_rows[i];
-        int y = OPT_LINE_Y(i + 1);
-        bool on = r->flag ? *r->flag : (*r->cycle != EB_VIEWPORT_WIDTH);
-        const char *v = "Off";
+        int x = ox + col * col_w;
+        int y = oy + r_in * line_h;
+
+        const char *v = NULL;
+        bool on = true;
         if (r->flag) {
+            on = *r->flag;
             v = on ? "On" : "Off";
-        } else {
+        } else if (r->cycle) {
             for (int k = 0; k < VIEW_WIDTH_COUNT; k++)
                 if (view_width_values[k] == *r->cycle)
                     v = view_width_names[k];
         }
-        draw_ascii(OPT_X + 10, y, r->label, 1, on ? ink : dim);
-        draw_ascii(OPT_X + OPT_W - 10 - measure_ascii(v), y, v, 1,
-                   on ? ink : dim);
+        draw_ascii(x, y, r->label, 1, ink);
+        if (v)
+            draw_ascii(x + col_w - 14 - measure_ascii(v), y, v, 1,
+                       on ? ink : dim);
+
+        opt_hit[opt_hit_count].x = x - 4;
+        opt_hit[opt_hit_count].y = y - 2;
+        opt_hit[opt_hit_count].w = col_w;
+        opt_hit[opt_hit_count].h = line_h;
+        opt_hit[opt_hit_count].row = i;
+        opt_hit_count++;
     }
-    draw_ascii(OPT_X + 10, OPT_LINE_Y(OPTION_ROW_COUNT + 1), "Close", 1, dim);
-    font_cell_bg = false;
-    font_id_cur = prev;
 }
 
-/* Returns true when the tap was consumed (so it does not also reach the
- * game or the FPS corner). */
 static bool options_handle_touch(const TouchState *t) {
-    if (!t->pressed)
-        return false;
-
-    if (!touch_in(t, OPT_X, OPT_Y, OPT_W, OPT_H)) {
-        options_open = false;   /* tap outside closes */
+    for (int i = 0; i < opt_hit_count; i++) {
+        if (!touch_in(t, opt_hit[i].x, opt_hit[i].y,
+                      opt_hit[i].w, opt_hit[i].h))
+            continue;
+        const OptionRow *r = &option_rows[opt_hit[i].row];
+        if (r->flag) {
+            *r->flag = !*r->flag;
+            if (r->flag == &video_opt_fps)
+                input_pulse_aux(AUX_FPS_TOGGLE);
+            else if (r->flag == &opt_letterbox_on)
+                host_opt_no_battle_letterbox = !opt_letterbox_on;
+        } else if (r->cycle) {
+            int k = 0;
+            for (int j = 0; j < VIEW_WIDTH_COUNT; j++)
+                if (view_width_values[j] == *r->cycle) k = j;
+            *r->cycle = view_width_values[(k + 1) % VIEW_WIDTH_COUNT];
+        } else if (r->action == OPT_ACT_SAVESTATE) {
+            input_pulse_aux(AUX_SAVESTATE);
+        } else if (r->action == OPT_ACT_LOADSTATE) {
+            input_pulse_aux(AUX_LOAD_STATE);
+        }
         return true;
     }
-    for (int i = 0; i < OPTION_ROW_COUNT; i++) {
-        if (touch_in(t, OPT_X, OPT_LINE_Y(i + 1) - 4, OPT_W, OPT_ROW_H)) {
-            const OptionRow *r = &option_rows[i];
-            if (r->flag) {
-                *r->flag = !*r->flag;
-                if (r->flag == &video_opt_fps)
-                    input_pulse_fps_toggle();
-                else if (r->flag == &opt_letterbox_on)
-                    host_opt_no_battle_letterbox = !opt_letterbox_on;
-            } else {
-                int k = 0;
-                for (int j = 0; j < VIEW_WIDTH_COUNT; j++)
-                    if (view_width_values[j] == *r->cycle) k = j;
-                *r->cycle = view_width_values[(k + 1) % VIEW_WIDTH_COUNT];
-            }
-            return true;
-        }
-    }
-    if (touch_in(t, OPT_X, OPT_LINE_Y(OPTION_ROW_COUNT + 1) - 4,
-                 OPT_W, OPT_ROW_H))
-        options_open = false;
-    return true;   /* swallow taps inside the panel */
+    return false;
 }
 
 /* The cards sit at the same Y in both contexts -- draw_battle_bottom() uses
@@ -795,7 +818,12 @@ static bool options_handle_touch(const TouchState *t) {
 #define GOODS_ITEM_MAX  14      /* CharStruct.items[14] */
 
 static int goods_character;   /* party slot, not member id */
-static bool goods_psi_tab;    /* false = Goods, true = PSI */
+/* Which content the panel is showing. Options used to be a separate floating
+ * window; it is a panel mode now, so there is one window on the bottom screen
+ * and its title row names whatever is in it -- the character for Goods/PSI,
+ * "Options" for the settings. */
+enum { PANEL_GOODS = 0, PANEL_PSI = 1, PANEL_OPTIONS = 2 };
+static int panel_mode;
 
 /* Item slot hit rects, filled in as the list is drawn, so a tap maps back to
  * the inventory slot the game expects. */
@@ -869,7 +897,10 @@ static void draw_goods_panel(void) {
      * and the border row is 8px, so the tiny font is also what fits. */
     font_id_cur = EB_TITLE_FONT;
     int titlex = GOODS_X + 8;
-    titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
+    if (panel_mode == PANEL_OPTIONS)
+        titlex += draw_ascii(titlex, GOODS_Y, "Options", 1, ink);
+    else
+        titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
     /* Tab marker sits in the title row too, so the list keeps the whole
      * interior. Tapping it swaps Goods <-> PSI. */
     (void)titlex;
@@ -893,7 +924,14 @@ static void draw_goods_panel(void) {
     scroll_hit_count = 0;
     int list_total_rows = 0;
 
-    if (goods_psi_tab) {
+    if (panel_mode == PANEL_OPTIONS) {
+        draw_options_rows(GOODS_X + 8, hy, GOODS_BOX_W - 16, line_h, rows);
+        font_cell_bg = false;
+        font_id_cur = prev;
+        return;
+    }
+
+    if (panel_mode == PANEL_PSI) {
         /* Overworld-usable PSI for this character, filtered the same way
          * generate_psi_list_items() does: a non-zero learn level for this
          * party member, reached by their current level, and PSI_USE_OVERWORLD
@@ -1015,7 +1053,7 @@ static void draw_goods_panel(void) {
 
     /* Scroll affordance, only when there is something out of view. Drawn in
      * the bottom-right of the window so it never covers a list entry. */
-    const int tab = goods_psi_tab ? 1 : 0;
+    const int tab = (panel_mode == PANEL_PSI) ? 1 : 0;
     if (list_total_rows > rows) {
         const int bw = 22, bh = 16;
         int bx = GOODS_X + GOODS_BOX_W - 8 - bw;
@@ -1091,6 +1129,21 @@ static bool goods_handle_touch(const TouchState *t) {
     if (!t->pressed)
         return false;
 
+    if (touch_in(t, sstate_hit_x, sstate_hit_y, sstate_hit_w, sstate_hit_h)) {
+        input_pulse_aux(AUX_SAVESTATE);
+        return true;
+    }
+    if (touch_in(t, settings_hit_x, settings_hit_y,
+                 settings_hit_w, settings_hit_h)) {
+        panel_mode = (panel_mode == PANEL_OPTIONS) ? PANEL_GOODS
+                                                   : PANEL_OPTIONS;
+        item_menu_slot = -1;
+        psi_armed = 0;
+        return true;
+    }
+    if (panel_mode == PANEL_OPTIONS && options_handle_touch(t))
+        return true;
+
     for (int i = 0; i < card_hit_count; i++) {
         if (touch_in(t, card_hit[i].x, card_hit[i].y,
                      card_hit[i].w, card_hit[i].h)) {
@@ -1122,7 +1175,7 @@ static bool goods_handle_touch(const TouchState *t) {
     for (int i = 0; i < scroll_hit_count; i++) {
         if (touch_in(t, scroll_hit[i].x, scroll_hit[i].y,
                      scroll_hit[i].w, scroll_hit[i].h)) {
-            int tab = goods_psi_tab ? 1 : 0;
+            int tab = (panel_mode == PANEL_PSI) ? 1 : 0;
             goods_scroll[tab] += scroll_hit[i].dir;
             if (goods_scroll[tab] < 0) goods_scroll[tab] = 0;
             item_menu_slot = -1;
@@ -1168,7 +1221,7 @@ static bool goods_handle_touch(const TouchState *t) {
     for (int i = 0; i < 2; i++) {
         if (tab_hit[i].w && touch_in(t, tab_hit[i].x, tab_hit[i].y,
                                      tab_hit[i].w, tab_hit[i].h)) {
-            goods_psi_tab = (i == 1);
+            panel_mode = (i == 1) ? PANEL_PSI : PANEL_GOODS;
             item_menu_slot = -1;
             return true;
         }
@@ -1361,6 +1414,8 @@ static void draw_bottom_panel(void) {
     /* Top-right status row: settings at the corner, money to its left.
      * Kept on its own row above the cards so it never sits beside a card. */
     int right = BOTTOM_WIDTH - HPPP_OW_MARGIN_X;
+    right -= draw_savestate_box(right, HPPP_STATUSROW_Y);
+    right -= 4;
     right -= draw_settings_box(right, HPPP_STATUSROW_Y);
     right -= 4;
     draw_money_box(right, HPPP_STATUSROW_Y);
@@ -1369,7 +1424,7 @@ static void draw_bottom_panel(void) {
     int lx = HPPP_OW_MARGIN_X;
     static const char *const tab_names[2] = { "Goods", "PSI" };
     for (int i = 0; i < 2; i++) {
-        int w = draw_label_box(tab_names[i], goods_psi_tab == (i == 1),
+        int w = draw_label_box(tab_names[i], panel_mode == (i == 1 ? PANEL_PSI : PANEL_GOODS),
                                lx, HPPP_STATUSROW_Y);
         tab_hit[i].x = lx;
         tab_hit[i].y = HPPP_STATUSROW_Y;
@@ -1397,8 +1452,7 @@ static void draw_bottom_panel(void) {
             }
         }
     }
-    if (options_open)
-        draw_options_panel();
+
     if (have_cards)
         return;
 
@@ -1527,19 +1581,8 @@ void platform_video_end_frame(void) {
         bool touch_dirty = false;
         if (context == 0) {
             const TouchState *t = touch_get();
-            if (options_open) {
-                if (options_handle_touch(t))
-                    touch_dirty = true;
-            } else if (t->pressed &&
-                       touch_in(t, settings_hit_x, settings_hit_y,
-                                settings_hit_w, settings_hit_h)) {
-                options_open = true;
+            if (goods_handle_touch(t))
                 touch_dirty = true;
-            } else if (goods_handle_touch(t)) {
-                touch_dirty = true;
-            }
-        } else if (options_open) {
-            options_open = false;
         }
         if (context != last_context) {
             /* Elements only clear their own rectangles, so the previous
@@ -1575,7 +1618,7 @@ void platform_video_end_frame(void) {
             sig = (sig ^ (uint32_t)count) * 16777619u;
             sig = (sig ^ game_state.money_carried) * 16777619u;
             sig = (sig ^ (uint32_t)goods_character) * 16777619u;
-            sig = (sig ^ (uint32_t)goods_psi_tab) * 16777619u;
+            sig = (sig ^ (uint32_t)panel_mode) * 16777619u;
             sig = (sig ^ (uint32_t)(item_menu_slot + 1)) * 16777619u;
             sig = (sig ^ (uint32_t)goods_scroll[0]) * 16777619u;
             sig = (sig ^ (uint32_t)goods_scroll[1]) * 16777619u;
