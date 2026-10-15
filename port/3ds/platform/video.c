@@ -161,7 +161,7 @@ void platform_video_begin_frame(void) {
 }
 
 /* Set from the options panel; defined further down with the other options. */
-extern bool video_opt_pillarbox;   /* declared extern near send_scanline */
+extern int video_opt_view_width;   /* declared extern near send_scanline */
 
 void platform_video_send_scanline(int y, const pixel_t *pixels) {
     if (y < 0 || y >= EB_VIEWPORT_HEIGHT)
@@ -173,14 +173,13 @@ void platform_video_send_scanline(int y, const pixel_t *pixels) {
      * game still renders 400 wide and the extra columns are blanked here.
      * Content stays exactly where it is -- this crops rather than rescaling,
      * which is what makes it free. */
-#if EB_VIEWPORT_WIDTH > SNES_WIDTH
-    if (video_opt_pillarbox) {
-        const int pad = (EB_VIEWPORT_WIDTH - SNES_WIDTH) / 2;
+    int vw = video_opt_view_width;
+    if (vw > 0 && vw < EB_VIEWPORT_WIDTH) {
+        const int pad = (EB_VIEWPORT_WIDTH - vw) / 2;
         memset(row, 0, (size_t)pad * sizeof(pixel_t));
-        memset(row + pad + SNES_WIDTH, 0,
-               (size_t)(EB_VIEWPORT_WIDTH - pad - SNES_WIDTH) * sizeof(pixel_t));
+        memset(row + pad + vw, 0,
+               (size_t)(EB_VIEWPORT_WIDTH - pad - vw) * sizeof(pixel_t));
     }
-#endif
 }
 
 pixel_t *platform_video_get_framebuffer(void) {
@@ -466,17 +465,16 @@ static int measure_ascii(const char *str) {
     return px;
 }
 
-/* Interior tile rows needed for one line of the current font. Glyphs draw
- * downward from the top-left, so a box sized without consulting the font
- * height puts the text through the bottom border. */
-static int box_rows_for_font(void) {
-    int h = font_get_height(font_id_cur);
-    int rows = (h + 7) / 8;
-    return rows < 1 ? 1 : rows;
-}
 
-/* Carried money, in the game's window frame. Returns the box width in
- * pixels so the caller can right-align a row of them. */
+/* Carried money, in the same box the B menu uses: window_configs[0x0A] is
+ * 8x4 tiles with number_padding 5, so the box is a FIXED size and the value
+ * is right-aligned inside it. Sizing it to the text made it grow and shrink,
+ * and under-measured so anything past two digits overflowed. */
+#define MONEY_TILES_W 8
+#define MONEY_TILES_H 4
+#define MONEY_BOX_W   (MONEY_TILES_W * 8)
+#define MONEY_BOX_H   (MONEY_TILES_H * 8)
+
 static int draw_money_box(int right_x, int dest_y) {
     char buf[16];
     snprintf(buf, sizeof(buf), "$%lu", (unsigned long)game_state.money_carried);
@@ -488,38 +486,36 @@ static int draw_money_box(int right_x, int dest_y) {
         return 0;
     }
 
-    int rows = box_rows_for_font();
-    int text_px = measure_ascii(buf);
-    int tiles_w = 2 + (text_px + 7) / 8;
-    if (tiles_w > 14) tiles_w = 14;
+    int x = right_x - MONEY_BOX_W;
+    draw_window_box(MONEY_TILES_W, MONEY_TILES_H, x, dest_y);
 
-    int box_w = tiles_w * 8;
-    int x = right_x - box_w;
-    draw_window_box(tiles_w, rows + 2, x, dest_y);
-    /* Centre the line in the interior rather than pinning it to the top. */
-    int ty = dest_y + 8 + (rows * 8 - font_get_height(font_id_cur)) / 2;
-    draw_ascii(x + 8, ty, buf, 1, PIXEL_RGB(255, 255, 255));
+    const int inner_x = x + 8, inner_w = (MONEY_TILES_W - 2) * 8;
+    const int inner_y = dest_y + 8, inner_h = (MONEY_TILES_H - 2) * 8;
+    int text_px = measure_ascii(buf);
+    int tx = inner_x + (text_px < inner_w ? inner_w - text_px : 0);
+    int ty = inner_y + (inner_h - font_get_height(font_id_cur)) / 2;
+    draw_ascii(tx, ty, buf, 1, PIXEL_RGB(255, 255, 255));
     font_id_cur = prev;
-    return box_w;
+    return MONEY_BOX_W;
 }
 
 /* Settings entry. Not interactive yet -- touch input still has to be put
  * back -- so this is the placeholder the hub will hang off. */
 static int settings_hit_x, settings_hit_y, settings_hit_w, settings_hit_h;
 
-static int draw_settings_box(int right_x, int dest_y, int rows) {
+static int draw_settings_box(int right_x, int dest_y) {
     const int tiles_w = 4;
     const int box_w = tiles_w * 8;
     int x = right_x - box_w;
     settings_hit_x = x;
     settings_hit_y = dest_y;
     settings_hit_w = box_w;
-    settings_hit_h = (rows + 2) * 8;
-    draw_window_box(tiles_w, rows + 2, x, dest_y);
+    settings_hit_h = MONEY_BOX_H;
+    draw_window_box(tiles_w, MONEY_TILES_H, x, dest_y);
 
     const pixel_t ink = PIXEL_RGB(255, 255, 255);
     int cx = x + box_w / 2;
-    int cy = dest_y + 8 + (rows * 8) / 2;
+    int cy = dest_y + MONEY_BOX_H / 2;
     for (int dy = -7; dy <= 7; dy++) {
         for (int dx = -7; dx <= 7; dx++) {
             int d2 = dx * dx + dy * dy;
@@ -540,50 +536,85 @@ static int draw_settings_box(int right_x, int dest_y, int rows) {
  * width is a build-time constant (it sizes the staging buffer, the PPU's
  * render width and the window scaling), so "widescreen off" is a render-time
  * pillarbox to the native 256 rather than a resolution change. */
-bool video_opt_pillarbox;
+/* Cropped presentation width. The viewport is a build-time 400; these are
+ * render-time crops, so content never moves or rescales.
+ *
+ *   400  full widescreen
+ *   320  true 4:3 on the 3DS's square pixels -- still 64 columns more than
+ *        the SNES drew, but the correct geometry for a 240-row field
+ *   256  the SNES's own column count. Against our 240 rows that is 16:15,
+ *        very nearly square, which is why it reads as 1:1 and not 4:3.
+ *
+ * A real SNES stretched 256 columns across a 4:3 CRT, so matching the native
+ * field of view AND 4:3 geometry at once would need horizontal resampling.
+ * These crops avoid that; the choice is left to the player. */
+int video_opt_view_width = EB_VIEWPORT_WIDTH;
+
+static const char *const view_width_names[]  = { "WIDE", "4:3", "PURE" };
+static const int         view_width_values[] = { EB_VIEWPORT_WIDTH, 320, SNES_WIDTH };
+#define VIEW_WIDTH_COUNT ((int)(sizeof(view_width_values) / sizeof(int)))
 
 static bool options_open;
 
 typedef struct {
     const char *label;
-    bool       *flag;
+    bool       *flag;    /* bool row, or NULL for a cycle row */
+    int        *cycle;   /* cycle row value */
 } OptionRow;
 
+bool video_opt_fps;
+
 static const OptionRow option_rows[] = {
-    { "PILLARBOX",  &video_opt_pillarbox },
+    { "SCREEN",     NULL,            &video_opt_view_width },
+    { "FPS METER",  &video_opt_fps,  NULL },
 };
 #define OPTION_ROW_COUNT ((int)(sizeof(option_rows) / sizeof(option_rows[0])))
 
-#define OPT_X      20
-#define OPT_Y      44
-#define OPT_W      280
-#define OPT_ROW_H  28
+/* The scratch tilemap draw_window_box() writes is a 32x32 map and
+ * draw_tilemap_rect_src() wraps its coordinates with & 31, so a box wider
+ * than 32 tiles wraps around and draws a second left border partway across
+ * -- which is the stray window edge that appeared at the right. Cap the
+ * width, and derive the height from the laid-out content so the last line
+ * cannot land past the bottom border. */
+#define OPT_TILES_W  30
+#define OPT_W        (OPT_TILES_W * 8)
+#define OPT_X        ((BOTTOM_WIDTH - OPT_W) / 2)
+#define OPT_ROW_H    22
+#define OPT_LINES    (OPTION_ROW_COUNT + 2)      /* title + options + close */
+#define OPT_PAD_Y    6
+#define OPT_TILES_H  (2 + (OPT_LINES * OPT_ROW_H + 2 * OPT_PAD_Y + 7) / 8)
+#define OPT_H        (OPT_TILES_H * 8)
+#define OPT_Y        ((BOTTOM_HEIGHT - OPT_H) / 2)
+#define OPT_LINE_Y(i) (OPT_Y + 8 + OPT_PAD_Y + (i) * OPT_ROW_H)
 
 static void draw_options_panel(void) {
     int prev = font_id_cur;
     font_id_cur = FONT_ID_NORMAL;
     if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
 
-    int rows = box_rows_for_font();
-    int tiles_w = OPT_W / 8;
-    int tiles_h = 2 + rows * (OPTION_ROW_COUNT + 1) + OPTION_ROW_COUNT + 1;
-    draw_window_box(tiles_w, tiles_h, OPT_X, OPT_Y);
+    draw_window_box(OPT_TILES_W, OPT_TILES_H, OPT_X, OPT_Y);
 
     const pixel_t ink = PIXEL_RGB(255, 255, 255);
     const pixel_t dim = PIXEL_RGB(150, 150, 165);
-    int y = OPT_Y + 10;
-    draw_ascii(OPT_X + 10, y, "OPTIONS", 1, ink);
-    y += OPT_ROW_H;
+    draw_ascii(OPT_X + 10, OPT_LINE_Y(0), "OPTIONS", 1, ink);
 
     for (int i = 0; i < OPTION_ROW_COUNT; i++) {
-        draw_ascii(OPT_X + 10, y, option_rows[i].label, 1,
-                   *option_rows[i].flag ? ink : dim);
-        draw_ascii(OPT_X + OPT_W - 60, y,
-                   *option_rows[i].flag ? "ON" : "OFF", 1,
-                   *option_rows[i].flag ? ink : dim);
-        y += OPT_ROW_H;
+        const OptionRow *r = &option_rows[i];
+        int y = OPT_LINE_Y(i + 1);
+        bool on = r->flag ? *r->flag : (*r->cycle != EB_VIEWPORT_WIDTH);
+        const char *v = "OFF";
+        if (r->flag) {
+            v = on ? "ON" : "OFF";
+        } else {
+            for (int k = 0; k < VIEW_WIDTH_COUNT; k++)
+                if (view_width_values[k] == *r->cycle)
+                    v = view_width_names[k];
+        }
+        draw_ascii(OPT_X + 10, y, r->label, 1, on ? ink : dim);
+        draw_ascii(OPT_X + OPT_W - 10 - measure_ascii(v), y, v, 1,
+                   on ? ink : dim);
     }
-    draw_ascii(OPT_X + 10, y, "CLOSE", 1, dim);
+    draw_ascii(OPT_X + 10, OPT_LINE_Y(OPTION_ROW_COUNT + 1), "CLOSE", 1, dim);
     font_id_cur = prev;
 }
 
@@ -593,23 +624,29 @@ static bool options_handle_touch(const TouchState *t) {
     if (!t->pressed)
         return false;
 
-    int y = OPT_Y + 10 + OPT_ROW_H;
+    if (!touch_in(t, OPT_X, OPT_Y, OPT_W, OPT_H)) {
+        options_open = false;   /* tap outside closes */
+        return true;
+    }
     for (int i = 0; i < OPTION_ROW_COUNT; i++) {
-        if (touch_in(t, OPT_X, y - 6, OPT_W, OPT_ROW_H)) {
-            *option_rows[i].flag = !*option_rows[i].flag;
+        if (touch_in(t, OPT_X, OPT_LINE_Y(i + 1) - 4, OPT_W, OPT_ROW_H)) {
+            const OptionRow *r = &option_rows[i];
+            if (r->flag) {
+                *r->flag = !*r->flag;
+                if (r->flag == &video_opt_fps)
+                    input_pulse_fps_toggle();
+            } else {
+                int k = 0;
+                for (int j = 0; j < VIEW_WIDTH_COUNT; j++)
+                    if (view_width_values[j] == *r->cycle) k = j;
+                *r->cycle = view_width_values[(k + 1) % VIEW_WIDTH_COUNT];
+            }
             return true;
         }
-        y += OPT_ROW_H;
     }
-    if (touch_in(t, OPT_X, y - 6, OPT_W, OPT_ROW_H)) {
+    if (touch_in(t, OPT_X, OPT_LINE_Y(OPTION_ROW_COUNT + 1) - 4,
+                 OPT_W, OPT_ROW_H))
         options_open = false;
-        return true;
-    }
-    /* A tap anywhere outside the panel closes it. */
-    if (!touch_in(t, OPT_X, OPT_Y, OPT_W, OPT_ROW_H * (OPTION_ROW_COUNT + 2))) {
-        options_open = false;
-        return true;
-    }
     return true;   /* swallow taps inside the panel */
 }
 
@@ -681,8 +718,13 @@ static void draw_battle_bottom(void) {
  * Returns 0 if nothing could be drawn (no party yet, or the window tiles are
  * not resident), so the caller can fall back to the composed text panel. */
 #define HPPP_OW_MARGIN_X  6
-#define HPPP_TOPROW_Y     4
-#define HPPP_CARDS_Y      44
+/* The cards sit at the same Y in both contexts -- draw_battle_bottom() uses
+ * 6, and a different overworld Y made them jump on every battle transition.
+ * The money/settings row therefore goes to the BOTTOM right: with four cards
+ * centred the top-right corner is only ~48px wide, too narrow for the money
+ * box's fixed 64. */
+#define HPPP_CARDS_Y      6
+#define HPPP_STATUSROW_Y  (BOTTOM_HEIGHT - MONEY_BOX_H - 6)
 #define HPPP_SHADOW_ROW0  ACTIVE_HPPP_WINDOW_Y_OFFSET
 #define HPPP_SHADOW_ROWS  (HPPP_WINDOW_HEIGHT + 2)
 
@@ -765,14 +807,9 @@ static void draw_bottom_panel(void) {
     /* Top-right status row: settings at the corner, money to its left.
      * Kept on its own row above the cards so it never sits beside a card. */
     int right = BOTTOM_WIDTH - HPPP_OW_MARGIN_X;
-    int prev_font = font_id_cur;
-    font_id_cur = FONT_ID_NORMAL;
-    int rows = font_get_glyph(font_id_cur, 0) ? box_rows_for_font() : 2;
-    font_id_cur = prev_font;
-
-    right -= draw_settings_box(right, HPPP_TOPROW_Y, rows);
+    right -= draw_settings_box(right, HPPP_STATUSROW_Y);
     right -= 4;
-    draw_money_box(right, HPPP_TOPROW_Y);
+    draw_money_box(right, HPPP_STATUSROW_Y);
 
     /* The game's own HP/PP panels, identical to the battle ones, centred. */
     bool have_cards = draw_overworld_hppp(HPPP_CARDS_Y) > 0;

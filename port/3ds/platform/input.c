@@ -18,6 +18,9 @@ static TouchState touch;
 
 const TouchState *touch_get(void) { return &touch; }
 
+static bool fps_toggle_pulse;
+void input_pulse_fps_toggle(void) { fps_toggle_pulse = true; }
+
 bool platform_input_init(void) {
     pad_state = 0;
     pad_prev = 0;
@@ -82,11 +85,14 @@ void platform_input_poll(void) {
     touch.pressed  = touch.down && !was_down;
     touch.released = !touch.down && was_down;
 
-    /* The FPS/profiling overlay used to toggle on a touch anywhere, which
-     * now collides with every control on the bottom screen. Moved to the
-     * bottom-right corner patch so the rest of the panel is free. */
-    if (touch.down && touch.x >= 288 && touch.y >= 208)
+    /* The overlay used to toggle on a touch anywhere, then briefly on an
+     * invisible corner patch. It lives in the options panel now, which
+     * raises a one-frame pulse here; game_main.c edge-detects the level, so
+     * one pulse is one toggle. */
+    if (fps_toggle_pulse) {
         aux_state |= AUX_FPS_TOGGLE;
+        fps_toggle_pulse = false;
+    }
 }
 
 uint16_t platform_input_get_pad(void) {

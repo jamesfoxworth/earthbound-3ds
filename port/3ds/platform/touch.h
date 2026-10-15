@@ -21,6 +21,11 @@ typedef struct {
 
 const TouchState *touch_get(void);
 
+/* One-shot FPS/profiling overlay toggle, raised by the options panel.
+ * game_main.c edge-detects AUX_FPS_TOGGLE, so a single-frame pulse is one
+ * toggle. */
+void input_pulse_fps_toggle(void);
+
 /* True when (x,y) falls inside the rect; convenience for hit-testing. */
 static inline bool touch_in(const TouchState *t, int x, int y, int w, int h) {
     return t->x >= x && t->x < x + w && t->y >= y && t->y < y + h;
