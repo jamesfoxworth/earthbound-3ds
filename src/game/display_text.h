@@ -218,6 +218,7 @@ void increment_secondary_memory(void);
 
 /* PRINT_PSI_NAME / GET_PSI_NAME: Port of asm/text/get_psi_name.asm.
  * Prints just the base PSI name (e.g. "Fire", "Rockin") without level suffix. */
+const uint8_t *psi_name_entry(uint16_t psi_name_id);
 void print_psi_name(uint16_t psi_name_id);
 
 /* PRINT_PSI_ABILITY_NAME: Port of asm/text/print_psi_ability_name.asm.

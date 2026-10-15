@@ -11,6 +11,9 @@
 #include "game/inventory.h"
 
 #define WINDOW_IN_BATTLE_TEXT 0x0E
+
+#include "game/battle.h"
+#include "game/display_text.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -403,10 +406,16 @@ static int draw_glyphs(int x, int y, const uint8_t *idx,
         const uint8_t *glyph = font_get_glyph(font_id_cur, idx[i]);
         uint8_t w = font_get_width(font_id_cur, idx[i]);
         if (glyph) {
+            /* The cell spans the advance, not just the glyph: the game's
+             * text tiles are opaque across the whole tile, so leaving the
+             * character_padding column unfilled left a 1px transparent gap
+             * between every character. */
+            const int cell_w = w + character_padding;
             for (int row = 0; row < h; row++) {
                 uint8_t bits = glyph[row];
-                for (int col = 0; col < w && col < 8; col++) {
-                    bool ink = !(bits & (0x80 >> col));   /* clear bit = ink */
+                for (int col = 0; col < cell_w; col++) {
+                    bool ink = (col < w && col < 8) &&
+                               !(bits & (0x80 >> col));   /* clear bit = ink */
                     if (!ink && !font_cell_bg)
                         continue;
                     pixel_t c = ink ? color : font_cell_bg_c;
@@ -737,6 +746,7 @@ static bool goods_psi_tab;    /* false = Goods, true = PSI */
 static struct { int x, y, w, h; uint8_t slot; } item_hit[GOODS_ITEM_MAX];
 static int item_hit_count;
 static int tab_hit_x, tab_hit_y, tab_hit_w, tab_hit_h;
+static int tab_psi_x, tab_psi_w, tab_goods_w;
 
 /* Card hit rects, filled in as the cards are drawn. */
 static struct { int x, y, w, h; } card_hit[HPPP_MAX_PARTY];
@@ -773,10 +783,21 @@ static void draw_goods_panel(void) {
     titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
     /* Tab marker sits in the title row too, so the list keeps the whole
      * interior. Tapping it swaps Goods <-> PSI. */
-    const char *tab = goods_psi_tab ? "PSI" : "Goods";
-    tab_hit_x = titlex + 8; tab_hit_y = GOODS_Y;
-    tab_hit_w = measure_ascii(tab) + 8; tab_hit_h = 8;
-    draw_ascii(tab_hit_x, GOODS_Y, tab, 1, ink);
+    /* Both choices are drawn, the inactive one dimmed. Showing only the
+     * current tab's name made the border read as a plain title -- there was
+     * no way to tell PSI existed, let alone that it was tappable. */
+    const pixel_t dim = font_cell_bg_c;
+    int tx0 = titlex + 10;
+    tab_hit_x = tx0; tab_hit_y = GOODS_Y; tab_hit_h = 8;
+    int wg = measure_ascii("Goods");
+    draw_ascii(tx0, GOODS_Y, "Goods", 1, goods_psi_tab ? dim : ink);
+    draw_ascii(tx0 + wg + 4, GOODS_Y, "/", 1, dim);
+    int wsl = measure_ascii("/") + 4;
+    tab_psi_x = tx0 + wg + wsl + 4;
+    draw_ascii(tab_psi_x, GOODS_Y, "PSI", 1, goods_psi_tab ? ink : dim);
+    tab_goods_w = wg;
+    tab_psi_w = measure_ascii("PSI");
+    tab_hit_w = (tab_psi_x + tab_psi_w) - tx0;
     font_id_cur = EB_PANEL_FONT;
 
     /* Derive the row count from the real font height rather than assuming
@@ -795,10 +816,45 @@ static void draw_goods_panel(void) {
     item_hit_count = 0;
 
     if (goods_psi_tab) {
-        /* PSI list. Display only for now -- the two-tap cast still needs the
-         * PSI menu's execution phases checked for the window state they
-         * assume, so nothing is wired to a tap yet. */
-        draw_ascii(GOODS_X + 8, hy, "PSI list coming next", 1, ink);
+        /* Overworld-usable PSI for this character, filtered the same way
+         * generate_psi_list_items() does: a non-zero learn level for this
+         * party member, reached by their current level, and PSI_USE_OVERWORLD
+         * in the ability's usability mask. PP cost comes from the ability's
+         * battle action. Display only -- the two-tap cast still needs the PSI
+         * menu's execution phases checked for the window state they assume. */
+        if (ensure_battle_psi_table() && battle_psi_table) {
+            int shown = 0;
+            for (uint16_t i = 1; i < PSI_MAX_ENTRIES &&
+                                 shown < GOODS_COLS * rows; i++) {
+                const PsiAbility *psi = &battle_psi_table[i];
+                if (psi->name == 0) break;
+                uint8_t learn = (member_id - 1 == 0) ? psi->ness_level
+                              : (member_id - 1 == 1) ? psi->paula_level
+                              : (member_id - 1 == 3) ? psi->poo_level : 0;
+                if (learn == 0 || learn > ch->level) continue;
+                if (!(psi->usability & PSI_USE_OVERWORLD)) continue;
+
+                int cx = GOODS_X + 8 + (shown / rows) * col_w;
+                int cy = hy + (shown % rows) * line_h;
+                int ax = cx;
+                const uint8_t *nm = psi_name_entry(psi->name);
+                if (nm) {
+                    ax += draw_eb(ax, cy, nm, 24, 1, ink);
+                } else if (psi->name == 1) {
+                    /* PSI Rockin: the name is the player's favourite thing. */
+                    ax += draw_eb(ax, cy, game_state.favourite_thing,
+                                  (int)sizeof(game_state.favourite_thing),
+                                  1, ink);
+                }
+                char cost[12];
+                snprintf(cost, sizeof(cost), " %u",
+                         (unsigned)(battle_action_table
+                                    ? (battle_action_table[psi->battle_action]
+                                       .pp_cost & 0xFF) : 0));
+                draw_ascii(ax, cy, cost, 1, ink);
+                shown++;
+            }
+        }
     } else {
         for (int i = 0; i < GOODS_COLS * rows && i < GOODS_ITEM_MAX; i++) {
             uint8_t id = ch->items[i];
@@ -835,8 +891,11 @@ static bool goods_handle_touch(const TouchState *t) {
             return true;
         }
     }
-    if (tab_hit_w && touch_in(t, tab_hit_x, tab_hit_y, tab_hit_w, tab_hit_h)) {
-        goods_psi_tab = !goods_psi_tab;
+    /* Each half of the tab selects its own side rather than toggling, so a
+     * tap on the label you can already see is a no-op instead of a surprise. */
+    if (tab_hit_w && touch_in(t, tab_hit_x - 4, tab_hit_y - 2,
+                              tab_hit_w + 8, tab_hit_h + 4)) {
+        goods_psi_tab = (t->x >= tab_psi_x - 4);
         return true;
     }
     /* Tapping an item hands the game the same inputs the Goods menu would:
@@ -878,7 +937,6 @@ static void draw_battle_bottom(void) {
     if (count < 0) count = 0;
 
     const int panel_px_w = HPPP_WINDOW_WIDTH * 8;
-    const int panel_px_h = HPPP_WINDOW_HEIGHT * 8;
     int row_w = count * panel_px_w;
     int ox = (BOTTOM_WIDTH - row_w) / 2;
 
@@ -894,16 +952,17 @@ static void draw_battle_bottom(void) {
                           dx, 6, 1);
     }
 
-    /* Battle dialogue goes in the same slot the overworld panel occupies, so
-     * the two contexts read as one layout. WINDOW_IN_BATTLE_TEXT is widened
-     * in window_configs for this (see the note there). */
-    int my = 6 + panel_px_h + 6;
+    /* Battle windows all anchor to the same top-left point as the overworld
+     * panel, so switching between windows of different sizes does not move
+     * the one corner the eye tracks. Their sizes are the game's own -- an
+     * earlier attempt to widen WINDOW_IN_BATTLE_TEXT bought nothing, because
+     * battle messages carry authored line breaks. */
+    int my = GOODS_Y;
     const WindowInfo *tw = get_window(WINDOW_IN_BATTLE_TEXT);
     if (tw && tw->width && tw->height &&
         !tilemap_rect_blank(tw->x, tw->y, tw->width, tw->height)) {
-        int tw_px = tw->width * 8;
         draw_tilemap_rect(tw->x, tw->y, tw->width, tw->height,
-                          (BOTTOM_WIDTH - tw_px) / 2, my, 1);
+                          GOODS_X, my, 1);
         my += tw->height * 8 + 4;
     }
 
@@ -919,8 +978,8 @@ static void draw_battle_bottom(void) {
     if (tilemap_rect_blank(w->x, w->y, w->width, w->height))
         return;
 
-    draw_tilemap_rect(w->x, w->y, w->width, w->height,
-                      (BOTTOM_WIDTH - menu_w) / 2, my, 1);
+    (void)menu_w;
+    draw_tilemap_rect(w->x, w->y, w->width, w->height, GOODS_X, my, 1);
 }
 
 /* Rasterise the four HP/PP panels at the top of the bottom screen, the same

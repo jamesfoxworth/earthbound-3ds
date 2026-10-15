@@ -733,6 +733,17 @@ static const uint8_t *resolve_text_addr(uint32_t addr, TextBlock **out_block) {
  * Port of GET_PSI_NAME (asm/text/get_psi_name.asm).
  * psi_name_id==1 (ROCKIN) → uses favourite_thing from game_state.
  * Otherwise indexes PSI_NAME_TABLE by (psi_name_id - 1). */
+/* The EB-encoded name behind a PSI name id, for callers that render text
+ * themselves rather than printing into the focus window (the 3DS port's
+ * bottom-screen PSI list). Returns NULL for ids with no table entry; id 1 is
+ * PSI Rockin, whose name is the player's favourite thing, so it has no table
+ * entry either and the caller reads game_state.favourite_thing. */
+const uint8_t *psi_name_entry(uint16_t psi_name_id) {
+    if (psi_name_id <= 1 || (psi_name_id - 1) >= PSI_NAME_MAX_ENTRIES)
+        return NULL;
+    return psi_name_data + (uint32_t)(psi_name_id - 1) * PSI_NAME_SIZE;
+}
+
 void print_psi_name(uint16_t psi_name_id) {
 
     if (psi_name_id == 1) {
