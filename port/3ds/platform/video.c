@@ -397,10 +397,12 @@ static pixel_t font_cell_bg_c;
 
 static pixel_t game_text_ink(void)  { return bgr555_to_pixel(ppu.cgram[1]); }
 static pixel_t game_text_back(void) { return bgr555_to_pixel(ppu.cgram[3]); }
-/* Colour 2 of the same sub-palette: the mid tone. An unselected label drawn
- * in the BACKGROUND colour is invisible, since that is what the opaque cell
- * behind it is filled with. */
-static pixel_t game_text_dim(void)  { return bgr555_to_pixel(ppu.cgram[2]); }
+/* Inactive / unavailable text is the ink colour at 50% coverage rather than a
+ * different palette entry. Colour 3 is the cell background, so drawing in it
+ * is invisible; colour 2 is a flavour-dependent hue -- green in some
+ * flavours -- which read as emphasis rather than as greyed out. A dither
+ * depends on no palette contents and always reads as unavailable. */
+static bool font_dither;
 
 static int draw_glyphs(int x, int y, const uint8_t *idx,
                        int count, int scale, pixel_t color) {
@@ -424,9 +426,16 @@ static int draw_glyphs(int x, int y, const uint8_t *idx,
                         continue;
                     pixel_t c = ink ? color : font_cell_bg_c;
                     for (int sy = 0; sy < scale; sy++)
-                        for (int sx = 0; sx < scale; sx++)
-                            img_px(cx + col * scale + sx,
-                                   y + row * scale + sy, c);
+                        for (int sx = 0; sx < scale; sx++) {
+                            int px = cx + col * scale + sx;
+                            int py = y + row * scale + sy;
+                            if (ink && font_dither && ((px + py) & 1)) {
+                                if (font_cell_bg)
+                                    img_px(px, py, font_cell_bg_c);
+                                continue;
+                            }
+                            img_px(px, py, c);
+                        }
                 }
             }
         }
@@ -578,8 +587,9 @@ static int draw_label_box(const char *label, bool active, int x, int dest_y) {
     int ty = inner_y + (inner_h - font_get_height(font_id_cur)) / 2;
     font_cell_bg = true;
     font_cell_bg_c = game_text_back();
-    draw_ascii(x + 8, ty, label, 1,
-               active ? game_text_ink() : game_text_dim());
+    font_dither = !active;
+    draw_ascii(x + 8, ty, label, 1, game_text_ink());
+    font_dither = false;
     font_cell_bg = false;
     font_id_cur = prev;
     return box_w;
@@ -791,7 +801,22 @@ static struct { int x, y, w, h; } tab_hit[2];
 #define IMENU_W       (IMENU_TILES_W * 8)
 #define IMENU_H       (IMENU_TILES_H * 8)
 
+/* One scroll offset per tab, in rows. A late-game Poo knows more PSI than
+ * fits, and the list used to just stop at the last visible row with no
+ * indication the rest existed. */
+static int  goods_scroll[2];
+static struct { int x, y, w, h, dir; } scroll_hit[2];
+static int  scroll_hit_count;
+
 static int  item_menu_slot = -1;   /* 0-based inventory slot, -1 = closed */
+
+/* Armed PSI ability (table index), waiting for a target card tap. 0 = none.
+ * Tap the ability, then tap whose card to cast it on -- the two taps supply
+ * exactly the caster and target the PSI menu's own steps would have asked
+ * for. */
+static uint16_t psi_armed;
+static struct { int x, y, w, h; uint16_t id; bool usable; } psi_hit[28];
+static int psi_hit_count;
 static struct { int x, y, w, h; int action; } imenu_hit[4];
 static int imenu_hit_count;
 
@@ -830,7 +855,12 @@ static void draw_goods_panel(void) {
     titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
     /* Tab marker sits in the title row too, so the list keeps the whole
      * interior. Tapping it swaps Goods <-> PSI. */
-    (void)titlex;
+    if (psi_armed) {
+        font_cell_bg = true;
+        font_cell_bg_c = game_text_back();
+        draw_ascii(titlex + 10, GOODS_Y, "- on whom?", 1, ink);
+        font_cell_bg = false;
+    }
     font_id_cur = EB_PANEL_FONT;
 
     /* Derive the row count from the real font height rather than assuming
@@ -847,6 +877,9 @@ static void draw_goods_panel(void) {
     const int hy = GOODS_Y + 8;
     const int col_w = (GOODS_BOX_W - 16) / GOODS_COLS;
     item_hit_count = 0;
+    psi_hit_count = 0;
+    scroll_hit_count = 0;
+    int list_total_rows = 0;
 
     if (goods_psi_tab) {
         /* Overworld-usable PSI for this character, filtered the same way
@@ -856,9 +889,11 @@ static void draw_goods_panel(void) {
          * battle action. Display only -- the two-tap cast still needs the PSI
          * menu's execution phases checked for the window state they assume. */
         if (ensure_battle_psi_table() && battle_psi_table) {
-            int shown = 0;
-            for (uint16_t i = 1; i < PSI_MAX_ENTRIES &&
-                                 shown < GOODS_COLS * rows; i++) {
+            /* Collect first, so the list has a length: that is what makes
+             * scrolling and the arrow affordance possible. */
+            uint16_t ids[PSI_MAX_ENTRIES];
+            int total = 0;
+            for (uint16_t i = 1; i < PSI_MAX_ENTRIES; i++) {
                 const PsiAbility *psi = &battle_psi_table[i];
                 if (psi->name == 0) break;
                 uint8_t learn = (member_id - 1 == 0) ? psi->ness_level
@@ -866,10 +901,40 @@ static void draw_goods_panel(void) {
                               : (member_id - 1 == 3) ? psi->poo_level : 0;
                 if (learn == 0 || learn > ch->level) continue;
                 if (!(psi->usability & PSI_USE_OVERWORLD)) continue;
+                ids[total++] = i;
+            }
+            list_total_rows = (total + GOODS_COLS - 1) / GOODS_COLS;
+            int skip = goods_scroll[1] * GOODS_COLS;
+            if (skip >= total) skip = 0;
+
+            int shown = 0;
+            for (int n = skip; n < total && shown < GOODS_COLS * rows; n++) {
+                uint16_t i = ids[n];
+                const PsiAbility *psi = &battle_psi_table[i];
 
                 int cx = GOODS_X + 8 + (shown / rows) * col_w;
                 int cy = hy + (shown % rows) * line_h;
                 int ax = cx;
+
+                /* Unaffordable PSI, and Teleport (PSI_CAT_OTHER, which needs a
+                 * destination rather than a target), are shown but not
+                 * castable. PS_HANDLE deducts PP without re-checking it, so
+                 * the check has to happen before the request. */
+                uint8_t cost_pp = battle_action_table
+                    ? (battle_action_table[psi->battle_action].pp_cost & 0xFF)
+                    : 0;
+                bool usable = (psi->category != PSI_CAT_OTHER) &&
+                              (cost_pp <= ch->current_pp);
+                font_dither = !usable;
+                if (psi_hit_count < (int)(sizeof(psi_hit) / sizeof(psi_hit[0]))) {
+                    psi_hit[psi_hit_count].x = cx;
+                    psi_hit[psi_hit_count].y = cy - 2;
+                    psi_hit[psi_hit_count].w = col_w;
+                    psi_hit[psi_hit_count].h = line_h;
+                    psi_hit[psi_hit_count].id = i;
+                    psi_hit[psi_hit_count].usable = usable;
+                    psi_hit_count++;
+                }
                 const uint8_t *nm = psi_name_entry(psi->name);
                 if (nm) {
                     ax += draw_eb(ax, cy, nm, 24, 1, ink);
@@ -900,19 +965,33 @@ static void draw_goods_panel(void) {
                                        .pp_cost & 0xFF) : 0));
                 int cw = measure_ascii(cost);
                 draw_ascii(cx + col_w - 14 - cw, cy, cost, 1, ink);
+                font_dither = false;
+                /* The armed ability is marked, and the window title row says
+                 * what to do next, so an armed cast is never a silent state. */
+                if (psi_armed == i)
+                    draw_ascii(cx - 7, cy, ">", 1, ink);
                 shown++;
             }
         }
     } else {
-        for (int i = 0; i < GOODS_COLS * rows && i < GOODS_ITEM_MAX; i++) {
+        int used = 0;
+        for (int i = 0; i < GOODS_ITEM_MAX; i++)
+            if (ch->items[i]) used = i + 1;
+        list_total_rows = (used + GOODS_COLS - 1) / GOODS_COLS;
+        int gskip = goods_scroll[0] * GOODS_COLS;
+        if (gskip >= GOODS_ITEM_MAX) gskip = 0;
+
+        for (int k = 0; k + gskip < GOODS_ITEM_MAX &&
+                        k < GOODS_COLS * rows; k++) {
+            int i = k + gskip;
             uint8_t id = ch->items[i];
             if (id == 0)
                 continue;
             const ItemConfig *it = get_item_entry(id);
             if (!it)
                 continue;
-            int cx = GOODS_X + 8 + (i / rows) * col_w;
-            int cy = hy + (i % rows) * line_h;
+            int cx = GOODS_X + 8 + (k / rows) * col_w;
+            int cy = hy + (k % rows) * line_h;
             draw_eb(cx, cy, it->name, ITEM_NAME_LEN, 1, ink);
             item_hit[item_hit_count].x = cx;
             item_hit[item_hit_count].y = cy;
@@ -921,6 +1000,40 @@ static void draw_goods_panel(void) {
             item_hit[item_hit_count].slot = (uint8_t)i;
             item_hit_count++;
         }
+    }
+
+    /* Scroll affordance, only when there is something out of view. Drawn in
+     * the bottom-right of the window so it never covers a list entry. */
+    const int tab = goods_psi_tab ? 1 : 0;
+    if (list_total_rows > rows) {
+        const int bw = 22, bh = 16;
+        int bx = GOODS_X + GOODS_BOX_W - 8 - bw;
+        int by = GOODS_Y + GOODS_TILES_H * 8 - 8 - bh;
+        for (int d = 0; d < 2; d++) {
+            int dir = d ? 1 : -1;
+            int ox = bx - d * (bw + 4);
+            bool can = d ? (goods_scroll[tab] + rows < list_total_rows)
+                         : (goods_scroll[tab] > 0);
+            /* Simple triangle, so it needs no glyph that the font may lack. */
+            pixel_t c = game_text_ink();
+            for (int yy = 0; yy < 7; yy++) {
+                int half = dir > 0 ? (6 - yy) : yy;
+                for (int xx = -half; xx <= half; xx++) {
+                    if (!can && ((xx + yy) & 1)) continue;
+                    img_px(ox + bw / 2 + xx, by + 4 + yy, c);
+                }
+            }
+            if (can) {
+                scroll_hit[scroll_hit_count].x = ox;
+                scroll_hit[scroll_hit_count].y = by;
+                scroll_hit[scroll_hit_count].w = bw;
+                scroll_hit[scroll_hit_count].h = bh;
+                scroll_hit[scroll_hit_count].dir = dir;
+                scroll_hit_count++;
+            }
+        }
+    } else {
+        goods_scroll[tab] = 0;
     }
 
     font_cell_bg = false;
@@ -947,8 +1060,9 @@ static void draw_item_menu(void) {
     imenu_hit_count = 0;
     for (int i = 0; i < 4; i++) {
         int ly = y + 8 + i * line_h;
-        draw_ascii(x + 8, ly, names[i], 1,
-                   wired[i] ? game_text_ink() : game_text_dim());
+        font_dither = !wired[i];
+        draw_ascii(x + 8, ly, names[i], 1, game_text_ink());
+        font_dither = false;
         if (wired[i]) {
             imenu_hit[imenu_hit_count].x = x;
             imenu_hit[imenu_hit_count].y = ly - 2;
@@ -970,7 +1084,38 @@ static bool goods_handle_touch(const TouchState *t) {
     for (int i = 0; i < card_hit_count; i++) {
         if (touch_in(t, card_hit[i].x, card_hit[i].y,
                      card_hit[i].w, card_hit[i].h)) {
-            goods_character = i;
+            if (psi_armed) {
+                int count = game_state.player_controlled_party_count;
+                uint8_t caster = (goods_character < count)
+                    ? game_state.party_members[goods_character] : 0;
+                uint8_t target = (i < count) ? game_state.party_members[i] : 0;
+                uint16_t ability = psi_armed;
+                psi_armed = 0;
+                if (caster >= 1 && caster <= TOTAL_PARTY_COUNT &&
+                    target >= 1 && target <= TOTAL_PARTY_COUNT) {
+                    host_mode_req_a = caster;
+                    host_mode_req_b = ability;
+                    host_mode_req_c = target;
+                    host_mode_request = HOST_MODE_REQ_PSI;
+                }
+                return true;
+            }
+            if (goods_character != i) {
+                goods_character = i;
+                goods_scroll[0] = goods_scroll[1] = 0;
+                item_menu_slot = -1;
+                psi_armed = 0;
+            }
+            return true;
+        }
+    }
+    for (int i = 0; i < scroll_hit_count; i++) {
+        if (touch_in(t, scroll_hit[i].x, scroll_hit[i].y,
+                     scroll_hit[i].w, scroll_hit[i].h)) {
+            int tab = goods_psi_tab ? 1 : 0;
+            goods_scroll[tab] += scroll_hit[i].dir;
+            if (goods_scroll[tab] < 0) goods_scroll[tab] = 0;
+            item_menu_slot = -1;
             return true;
         }
     }
@@ -1014,6 +1159,7 @@ static bool goods_handle_touch(const TouchState *t) {
         if (tab_hit[i].w && touch_in(t, tab_hit[i].x, tab_hit[i].y,
                                      tab_hit[i].w, tab_hit[i].h)) {
             goods_psi_tab = (i == 1);
+            item_menu_slot = -1;
             return true;
         }
     }
@@ -1021,6 +1167,15 @@ static bool goods_handle_touch(const TouchState *t) {
      * GAME_MODE_USE_ITEM classifies usability, shows the check/description
      * text and runs targeting itself, so Cookies heal, Cold Remedy cures and
      * an unusable item just reports why -- all the game's own rules. */
+    for (int i = 0; i < psi_hit_count; i++) {
+        if (touch_in(t, psi_hit[i].x, psi_hit[i].y,
+                     psi_hit[i].w, psi_hit[i].h)) {
+            psi_armed = psi_hit[i].usable
+                        ? (psi_armed == psi_hit[i].id ? 0 : psi_hit[i].id)
+                        : 0;
+            return true;
+        }
+    }
     for (int i = 0; i < item_hit_count; i++) {
         if (touch_in(t, item_hit[i].x, item_hit[i].y,
                      item_hit[i].w, item_hit[i].h)) {
@@ -1396,6 +1551,9 @@ void platform_video_end_frame(void) {
             sig = (sig ^ (uint32_t)goods_character) * 16777619u;
             sig = (sig ^ (uint32_t)goods_psi_tab) * 16777619u;
             sig = (sig ^ (uint32_t)(item_menu_slot + 1)) * 16777619u;
+            sig = (sig ^ (uint32_t)goods_scroll[0]) * 16777619u;
+            sig = (sig ^ (uint32_t)goods_scroll[1]) * 16777619u;
+            sig = (sig ^ (uint32_t)psi_armed) * 16777619u;
             for (int i = 0; i < count && i < HPPP_MAX_PARTY; i++) {
                 uint8_t member_id = game_state.party_members[i];
                 if (member_id == 0 || member_id > TOTAL_PARTY_COUNT)

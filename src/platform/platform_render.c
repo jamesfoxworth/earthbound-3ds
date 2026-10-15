@@ -23,6 +23,7 @@ int platform_visible_width = EB_VIEWPORT_WIDTH;
 HostModeRequest host_mode_request = HOST_MODE_REQ_NONE;
 uint16_t host_mode_req_a;
 uint16_t host_mode_req_b;
+uint16_t host_mode_req_c;
 uint32_t host_mode_req_addr;
 
 void platform_render_frame(scanline_stamp_cb_t fps_overlay_cb) {

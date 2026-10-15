@@ -1411,7 +1411,7 @@ StepResult mode_step_overworld(ModeState *mst) {
                     child.use_item.phase = UI_ENTER;
                     child.use_item.char_id = req_char;
                     child.use_item.item_slot = req_slot;
-                    st->phase = OWP_POST_TELEPORT;
+                    st->phase = OWP_RESUME_HOSTREQ;
                     return STEP_RESULT_PUSH_INIT(GAME_MODE_USE_ITEM, &child);
                 }
                 if (host_mode_request == HOST_MODE_REQ_SHOW_TEXT) {
@@ -1423,10 +1423,38 @@ StepResult mode_step_overworld(ModeState *mst) {
                     child = (ModeState){0};
                     if (dt_make_child_init(&child, req_addr)) {
                         create_window(WINDOW_TEXT_STANDARD);
-                        st->phase = OWP_POST_TELEPORT;
+                        st->phase = OWP_RESUME_HOSTREQ;
                         return STEP_RESULT_PUSH_INIT(GAME_MODE_DISPLAY_TEXT,
                                                      &child);
                     }
+                }
+                if (host_mode_request == HOST_MODE_REQ_PSI &&
+                    ensure_battle_psi_table() && battle_psi_table &&
+                    battle_action_table) {
+                    /* Enter the PSI menu at its execution head with the two
+                     * fields its character-select and targeting steps exist to
+                     * fill in. PS_HANDLE is self-contained from there: it
+                     * deducts PP, sets the battler structures and names,
+                     * creates its own text window and dispatches the action,
+                     * so the game's rules apply rather than a reimplementation.
+                     * The caller has already checked PP and excluded teleport,
+                     * which needs a destination menu rather than a target. */
+                    uint16_t caster = host_mode_req_a;
+                    uint16_t ability = host_mode_req_b;
+                    uint16_t target = host_mode_req_c;
+                    host_mode_request = HOST_MODE_REQ_NONE;
+                    const PsiAbility *psi = &battle_psi_table[ability];
+                    child = (ModeState){0};
+                    child.psi_menu.phase = PS_HANDLE;
+                    child.psi_menu.char_id = caster;
+                    child.psi_menu.last_ability = ability;
+                    child.psi_menu.battle_action_id = psi->battle_action;
+                    child.psi_menu.psi_category = psi->category;
+                    child.psi_menu.pp_cost =
+                        battle_action_table[psi->battle_action].pp_cost & 0xFF;
+                    child.psi_menu.action_result = target;
+                    st->phase = OWP_RESUME_HOSTREQ;
+                    return STEP_RESULT_PUSH_INIT(GAME_MODE_PSI_MENU, &child);
                 }
                 if (core.pad1_pressed & PAD_A) {
                     child = (ModeState){0};
@@ -1454,6 +1482,23 @@ StepResult mode_step_overworld(ModeState *mst) {
                     return STEP_RESULT_PUSH_INIT(GAME_MODE_QUICK_CHECKTALK, &child);
                 }
             }
+            st->phase = OWP_POST_TELEPORT;
+            continue;
+
+        case OWP_RESUME_HOSTREQ:
+            /* A port-UI request (item use, item help) reaches the same modes
+             * the pause menu reaches, so it needs the same exit bracket. Those
+             * modes leave entities disabled and windows open for the pause
+             * menu's PM_CLEANUP to tidy; without this the player could not
+             * move until the real menu was opened and closed. */
+            clear_instant_printing();
+            hide_hppp_windows();
+            close_all_windows();
+            st->phase = OWP_RESUME_HOSTREQ_DONE;
+            return STEP_RESULT_PUSH(GAME_MODE_ENTITY_FADE_WAIT);
+
+        case OWP_RESUME_HOSTREQ_DONE:
+            enable_all_entities();
             st->phase = OWP_POST_TELEPORT;
             continue;
 

@@ -83,11 +83,14 @@ typedef enum {
     HOST_MODE_REQ_NONE = 0,
     HOST_MODE_REQ_USE_ITEM,   /* a = member id, b = 1-based inventory slot */
     HOST_MODE_REQ_SHOW_TEXT,  /* addr = script address to display */
+    HOST_MODE_REQ_PSI,        /* a = caster member id, b = PSI table index,
+                               * c = target member id (0xFF = whole party) */
 } HostModeRequest;
 
 extern HostModeRequest host_mode_request;
 extern uint16_t host_mode_req_a;
 extern uint16_t host_mode_req_b;
+extern uint16_t host_mode_req_c;
 extern uint32_t host_mode_req_addr;
 
 /*

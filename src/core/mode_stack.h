@@ -2435,6 +2435,12 @@ typedef enum {
                              * -> OWP_RENDER in the same step (no yield = no Ness-flash). */
     OWP_RENDER_FLUSH,       /* resume after a parked actionscript frame's child popped:
                              * update_screen + update_swirl_effect -> OWP_POST_TOP. */
+    OWP_RESUME_HOSTREQ,     /* after a HostModeRequest child pops: run the same
+                             * cleanup the pause menu's PM_CLEANUP does, then
+                             * wait on the entity fade. Added at the end of the
+                             * enum so existing phase values keep their
+                             * numbering. */
+    OWP_RESUME_HOSTREQ_DONE,/* after that fade: enable_all_entities -> POST_TELEPORT */
     OWP_BOOT_FLUSH,         /* resume after the boot actionscript frame parked (rare —
                              * EVENT_001/002 run no modal): overworld_boot_flush() ->
                              * OWP_RENDER in the same step. */
