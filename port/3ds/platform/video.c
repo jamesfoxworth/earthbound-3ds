@@ -148,65 +148,27 @@ static const WindowInfo *focused_window(void) {
     return NULL;
 }
 
-static void draw_focused_window_to_bottom(void) {
-    u16 fbw = 0, fbh = 0;
-    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
-    if (!fb)
+static inline void put_px(u16 *fb, int fbw, int x, int y, pixel_t c) {
+    if (x < 0 || x >= BOTTOM_WIDTH || y < 0 || y >= BOTTOM_HEIGHT)
         return;
+    fb[(size_t)x * fbw + (fbw - 1 - y)] = c;
+}
 
-    /* Whichever window has focus is the one the player is interacting with,
-     * so this follows the overworld menu, the battle menus and their
-     * sub-menus without naming any of them. */
-    const WindowInfo *w = focused_window();
-    bottom_layout.valid = false;
-
-    /* Focus drops for a frame or two across menu transitions (one window
-     * closing before the next takes focus), and blanking on each of those
-     * showed as a black flicker. Hold the previous frame instead until focus
-     * has been gone long enough to mean it. Nothing is redrawn while held, so
-     * the double-buffered pair keeps showing the last good image. */
-    static int idle_frames;
-    if (!w || w->width == 0 || w->height == 0) {
-        if (++idle_frames < 10)
-            return;
-        memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
-        return;
-    }
-    idle_frames = 0;
-
-    memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
-
+/* Rasterise a rectangle of the BG3 tilemap to the bottom screen. BG3 is the
+ * window layer -- 2bpp, 8x8 tiles, 32x32 tilemap -- so any window the game has
+ * drawn can be redrawn here from the game's own tiles. Base addresses and the
+ * index-0-is-transparent rule follow ppu_render.c. Brightness is deliberately
+ * not applied so the panel stays readable while the world fades. */
+static void draw_tilemap_rect(u16 *fb, int fbw, int tile_x, int tile_y,
+                              int tiles_w, int tiles_h,
+                              int dest_x, int dest_y, int scale) {
     const uint32_t map_base  = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
     const uint32_t tile_base = (uint32_t)(ppu.bg_nba[1] & 0x0F) * 0x2000;
 
-    int px_w = w->width * 8;
-    int px_h = w->height * 8;
-    if (px_w <= 0 || px_h <= 0)
-        return;
-
-    /* Integer scale only, so it stays pixel-exact. Doubling also makes the
-     * menus big enough to touch. */
-    int scale = (px_w * 2 <= BOTTOM_WIDTH && px_h * 2 <= BOTTOM_HEIGHT) ? 2 : 1;
-    int out_w = px_w * scale;
-    int out_h = px_h * scale;
-    if (out_w > BOTTOM_WIDTH || out_h > BOTTOM_HEIGHT)
-        return;
-
-    int ox = (BOTTOM_WIDTH  - out_w) / 2;
-    int oy = (BOTTOM_HEIGHT - out_h) / 2;
-
-    bottom_layout.valid     = true;
-    bottom_layout.window_id = w->id;
-    bottom_layout.ox        = ox;
-    bottom_layout.oy        = oy;
-    bottom_layout.scale     = scale;
-    bottom_layout.tiles_w   = w->width;
-    bottom_layout.tiles_h   = w->height;
-
-    for (int ty = 0; ty < w->height; ty++) {
-        for (int tx = 0; tx < w->width; tx++) {
+    for (int ty = 0; ty < tiles_h; ty++) {
+        for (int tx = 0; tx < tiles_w; tx++) {
             uint32_t entry_addr = map_base +
-                ((size_t)(((w->y + ty) & 31) * 32 + ((w->x + tx) & 31))) * 2;
+                ((size_t)(((tile_y + ty) & 31) * 32 + ((tile_x + tx) & 31))) * 2;
             if (entry_addr + 1 >= VRAM_SIZE)
                 continue;
 
@@ -221,29 +183,26 @@ static void draw_focused_window_to_bottom(void) {
                 continue;
 
             for (int row = 0; row < 8; row++) {
-                const uint8_t *planes = &ppu.vram[tile_addr + (vflip ? 7 - row : row) * 2];
+                const uint8_t *planes =
+                    &ppu.vram[tile_addr + (vflip ? 7 - row : row) * 2];
                 for (int col = 0; col < 8; col++) {
                     int bit = 7 - (hflip ? 7 - col : col);
                     uint8_t idx = (uint8_t)(((planes[0] >> bit) & 1) |
                                             (((planes[1] >> bit) & 1) << 1));
                     if (idx == 0)
-                        continue;  /* transparent */
+                        continue;
 
                     pixel_t c = bgr555_to_pixel(ppu.cgram[palette * 4 + idx]);
-
-                    int bx = ox + (tx * 8 + col) * scale;
-                    int by = oy + (ty * 8 + row) * scale;
-                    for (int sy = 0; sy < scale; sy++) {
-                        int yy = fbw - 1 - (by + sy);
+                    int bx = dest_x + (tx * 8 + col) * scale;
+                    int by = dest_y + (ty * 8 + row) * scale;
+                    for (int sy = 0; sy < scale; sy++)
                         for (int sx = 0; sx < scale; sx++)
-                            fb[(size_t)(bx + sx) * fbw + yy] = c;
-                    }
+                            put_px(fb, fbw, bx + sx, by + sy, c);
                 }
             }
         }
     }
 }
-
 
 /* ---- Bottom-screen panel -------------------------------------------------
  *
@@ -255,11 +214,6 @@ static void draw_focused_window_to_bottom(void) {
  * without needing the window system.
  */
 
-static inline void put_px(u16 *fb, int fbw, int x, int y, pixel_t c) {
-    if (x < 0 || x >= BOTTOM_WIDTH || y < 0 || y >= BOTTOM_HEIGHT)
-        return;
-    fb[(size_t)x * fbw + (fbw - 1 - y)] = c;
-}
 
 /* Draw one glyph run. Glyph rows are bitmasks where a CLEAR bit is ink (the
  * convention font_get_glyph uses). Returns the advance in pixels. */
@@ -308,6 +262,40 @@ static int draw_eb(u16 *fb, int fbw, int x, int y, const uint8_t *eb, int max,
         idx[n++] = (uint8_t)(eb[i] - 0x50);
     }
     return draw_glyphs(fb, fbw, x, y, idx, n, scale, color);
+}
+
+/* Battle: the four HP/PP panels across the top, the focused menu window
+ * beneath them -- the game has already drawn both into the window layer, so
+ * these are its own panels, not a reconstruction. */
+static void draw_battle_bottom(u16 *fb, int fbw) {
+    int count = game_state.player_controlled_party_count;
+    if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
+    if (count < 0) count = 0;
+
+    const int panel_px_w = HPPP_WINDOW_WIDTH * 8;
+    int row_w = count * panel_px_w;
+    int ox = (BOTTOM_WIDTH - row_w) / 2;
+
+    for (int i = 0; i < count; i++) {
+        int tx = HPPP_CENTER_TILE - (count * HPPP_WINDOW_WIDTH) / 2
+                 + i * HPPP_WINDOW_WIDTH;
+        int ty = (win.battle_menu_current_character_id == (int16_t)i)
+                 ? ACTIVE_HPPP_WINDOW_Y_OFFSET : NORMAL_HPPP_WINDOW_Y_OFFSET;
+        draw_tilemap_rect(fb, fbw, tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
+                          ox + i * panel_px_w, 6, 1);
+    }
+
+    const WindowInfo *w = focused_window();
+    if (!w || w->width == 0 || w->height == 0)
+        return;
+
+    int menu_w = w->width * 8;
+    int menu_h = w->height * 8;
+    int my = 6 + HPPP_WINDOW_HEIGHT * 8 + 10;
+    if (menu_h > BOTTOM_HEIGHT - my)
+        return;
+    draw_tilemap_rect(fb, fbw, w->x, w->y, w->width, w->height,
+                      (BOTTOM_WIDTH - menu_w) / 2, my, 1);
 }
 
 static void draw_bottom_panel(void) {
@@ -414,10 +402,16 @@ void platform_video_end_frame(void) {
      * UI that belongs down here; elsewhere show the composed status panel.
      * Skipped while the debug console owns the screen. */
     if (!platform_console_logging) {
-        if (ow.battle_mode)
-            draw_focused_window_to_bottom();
-        else
+        if (ow.battle_mode) {
+            u16 bw = 0, bh = 0;
+            u16 *bfb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
+            if (bfb) {
+                memset(bfb, 0, (size_t)bw * bh * sizeof(pixel_t));
+                draw_battle_bottom(bfb, bw);
+            }
+        } else {
             draw_bottom_panel();
+        }
     }
 
     /* Palette readout, console mode only: the BG sub-palettes the PPU actually
