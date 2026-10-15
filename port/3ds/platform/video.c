@@ -556,6 +556,31 @@ static int draw_money_box(int right_x, int dest_y) {
     return MONEY_BOX_W;
 }
 
+/* A labelled button in the same frame style as the money box, used for the
+ * Goods/PSI tabs in the status row. The active one is drawn in the text ink,
+ * the inactive one in the text background colour so it reads as unselected
+ * while still using the game's own palette. */
+static int draw_label_box(const char *label, bool active, int x, int dest_y) {
+    int prev = font_id_cur;
+    font_id_cur = EB_PANEL_FONT;
+    if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return 0; }
+
+    int text_px = measure_ascii(label);
+    int tiles_w = 2 + (text_px + 7) / 8;
+    int box_w = tiles_w * 8;
+    draw_window_box(tiles_w, MONEY_TILES_H, x, dest_y);
+
+    const int inner_y = dest_y + 8, inner_h = (MONEY_TILES_H - 2) * 8;
+    int ty = inner_y + (inner_h - font_get_height(font_id_cur)) / 2;
+    font_cell_bg = true;
+    font_cell_bg_c = game_text_back();
+    draw_ascii(x + 8, ty, label, 1,
+               active ? game_text_ink() : game_text_back());
+    font_cell_bg = false;
+    font_id_cur = prev;
+    return box_w;
+}
+
 /* Settings entry. Not interactive yet -- touch input still has to be put
  * back -- so this is the placeholder the hub will hang off. */
 static int settings_hit_x, settings_hit_y, settings_hit_w, settings_hit_h;
@@ -745,8 +770,11 @@ static bool goods_psi_tab;    /* false = Goods, true = PSI */
  * the inventory slot the game expects. */
 static struct { int x, y, w, h; uint8_t slot; } item_hit[GOODS_ITEM_MAX];
 static int item_hit_count;
-static int tab_hit_x, tab_hit_y, tab_hit_w, tab_hit_h;
-static int tab_psi_x, tab_psi_w, tab_goods_w;
+/* Tab buttons live in the status row with the money and settings boxes, not
+ * in the window's title. In the title they rendered through the tiny
+ * title font -- which is why they came out as blanks -- and read as part of
+ * the name rather than as controls. */
+static struct { int x, y, w, h; } tab_hit[2];
 
 /* Card hit rects, filled in as the cards are drawn. */
 static struct { int x, y, w, h; } card_hit[HPPP_MAX_PARTY];
@@ -783,21 +811,7 @@ static void draw_goods_panel(void) {
     titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
     /* Tab marker sits in the title row too, so the list keeps the whole
      * interior. Tapping it swaps Goods <-> PSI. */
-    /* Both choices are drawn, the inactive one dimmed. Showing only the
-     * current tab's name made the border read as a plain title -- there was
-     * no way to tell PSI existed, let alone that it was tappable. */
-    const pixel_t dim = font_cell_bg_c;
-    int tx0 = titlex + 10;
-    tab_hit_x = tx0; tab_hit_y = GOODS_Y; tab_hit_h = 8;
-    int wg = measure_ascii("Goods");
-    draw_ascii(tx0, GOODS_Y, "Goods", 1, goods_psi_tab ? dim : ink);
-    draw_ascii(tx0 + wg + 4, GOODS_Y, "/", 1, dim);
-    int wsl = measure_ascii("/") + 4;
-    tab_psi_x = tx0 + wg + wsl + 4;
-    draw_ascii(tab_psi_x, GOODS_Y, "PSI", 1, goods_psi_tab ? ink : dim);
-    tab_goods_w = wg;
-    tab_psi_w = measure_ascii("PSI");
-    tab_hit_w = (tab_psi_x + tab_psi_w) - tx0;
+    (void)titlex;
     font_id_cur = EB_PANEL_FONT;
 
     /* Derive the row count from the real font height rather than assuming
@@ -846,6 +860,14 @@ static void draw_goods_panel(void) {
                                   (int)sizeof(game_state.favourite_thing),
                                   1, ink);
                 }
+                /* The game's own suffix label (a/b/g/S/O glyphs): several
+                 * table entries share one name and differ only by level, so
+                 * without it a learned Lifeup a and b read identically. */
+                char suffix[4];
+                get_psi_suffix_label(i, suffix, sizeof(suffix));
+                if (suffix[0])
+                    ax += draw_ascii(ax, cy, suffix, 1, ink);
+
                 char cost[12];
                 snprintf(cost, sizeof(cost), " %u",
                          (unsigned)(battle_action_table
@@ -893,10 +915,12 @@ static bool goods_handle_touch(const TouchState *t) {
     }
     /* Each half of the tab selects its own side rather than toggling, so a
      * tap on the label you can already see is a no-op instead of a surprise. */
-    if (tab_hit_w && touch_in(t, tab_hit_x - 4, tab_hit_y - 2,
-                              tab_hit_w + 8, tab_hit_h + 4)) {
-        goods_psi_tab = (t->x >= tab_psi_x - 4);
-        return true;
+    for (int i = 0; i < 2; i++) {
+        if (tab_hit[i].w && touch_in(t, tab_hit[i].x, tab_hit[i].y,
+                                     tab_hit[i].w, tab_hit[i].h)) {
+            goods_psi_tab = (i == 1);
+            return true;
+        }
     }
     /* Tapping an item hands the game the same inputs the Goods menu would:
      * GAME_MODE_USE_ITEM classifies usability, shows the check/description
@@ -905,11 +929,18 @@ static bool goods_handle_touch(const TouchState *t) {
     for (int i = 0; i < item_hit_count; i++) {
         if (touch_in(t, item_hit[i].x, item_hit[i].y,
                      item_hit[i].w, item_hit[i].h)) {
+            /* char_id is a MEMBER id and item_slot is 1-based: the game reads
+             * party_characters[char_id - 1].items[slot - 1]. Passing the party
+             * slot and a 0-based index is why a tap used the item above, and
+             * why the first row acted as nothing (slot 0 = "no item"). */
             int count = game_state.player_controlled_party_count;
             if (goods_character < count) {
-                host_mode_req_a = (uint16_t)(goods_character + 1); /* 1-based */
-                host_mode_req_b = item_hit[i].slot;
-                host_mode_request = HOST_MODE_REQ_USE_ITEM;
+                uint8_t mid = game_state.party_members[goods_character];
+                if (mid >= 1 && mid <= TOTAL_PARTY_COUNT) {
+                    host_mode_req_a = mid;
+                    host_mode_req_b = (uint16_t)(item_hit[i].slot + 1);
+                    host_mode_request = HOST_MODE_REQ_USE_ITEM;
+                }
             }
             return true;
         }
@@ -952,23 +983,10 @@ static void draw_battle_bottom(void) {
                           dx, 6, 1);
     }
 
-    /* Battle windows all anchor to the same top-left point as the overworld
-     * panel, so switching between windows of different sizes does not move
-     * the one corner the eye tracks. Their sizes are the game's own -- an
-     * earlier attempt to widen WINDOW_IN_BATTLE_TEXT bought nothing, because
-     * battle messages carry authored line breaks. */
-    int my = GOODS_Y;
-    const WindowInfo *tw = get_window(WINDOW_IN_BATTLE_TEXT);
-    if (tw && tw->width && tw->height &&
-        !tilemap_rect_blank(tw->x, tw->y, tw->width, tw->height)) {
-        draw_tilemap_rect(tw->x, tw->y, tw->width, tw->height,
-                          GOODS_X, my, 1);
-        my += tw->height * 8 + 4;
-    }
+    int my = 6 + HPPP_WINDOW_HEIGHT * 8 + 10;
 
-    /* The command menu sits under it. */
     const WindowInfo *w = routed_menu_window();
-    if (!w || w->id == WINDOW_IN_BATTLE_TEXT)
+    if (!w)
         return;
 
     int menu_w = w->width * 8;
@@ -978,8 +996,8 @@ static void draw_battle_bottom(void) {
     if (tilemap_rect_blank(w->x, w->y, w->width, w->height))
         return;
 
-    (void)menu_w;
-    draw_tilemap_rect(w->x, w->y, w->width, w->height, GOODS_X, my, 1);
+    draw_tilemap_rect(w->x, w->y, w->width, w->height,
+                      (BOTTOM_WIDTH - menu_w) / 2, my, 1);
 }
 
 /* Rasterise the four HP/PP panels at the top of the bottom screen, the same
@@ -1095,6 +1113,19 @@ static void draw_bottom_panel(void) {
     right -= draw_settings_box(right, HPPP_STATUSROW_Y);
     right -= 4;
     draw_money_box(right, HPPP_STATUSROW_Y);
+
+    /* Goods / PSI tabs at the left of the same row. */
+    int lx = HPPP_OW_MARGIN_X;
+    static const char *const tab_names[2] = { "Goods", "PSI" };
+    for (int i = 0; i < 2; i++) {
+        int w = draw_label_box(tab_names[i], goods_psi_tab == (i == 1),
+                               lx, HPPP_STATUSROW_Y);
+        tab_hit[i].x = lx;
+        tab_hit[i].y = HPPP_STATUSROW_Y;
+        tab_hit[i].w = w;
+        tab_hit[i].h = MONEY_BOX_H;
+        lx += w + 4;
+    }
 
     /* The game's own HP/PP panels, identical to the battle ones, centred. */
     bool have_cards = draw_overworld_hppp(HPPP_CARDS_Y) > 0;
