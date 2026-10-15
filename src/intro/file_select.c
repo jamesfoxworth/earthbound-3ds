@@ -1615,6 +1615,14 @@ StepResult mode_step_new_game_naming(ModeState *ms) {
             uint8_t item = entry[10 + j];
             if (item != 0) party_characters[c].items[j] = item;
         }
+
+        /* Assembly lines 577-579: hp_pp_window_options = $0400 (normal mode).
+         * These are the HP/PP window's tilemap palette-select bits, so leaving
+         * them at 0 draws the window in BG palette 0 rather than palette 1 —
+         * different colours entirely. Nothing else initialises this on a new
+         * file; the other two writers are in the Goods menu, which only
+         * happens to fix it as a side effect of being opened. */
+        party_characters[c].hp_pp_window_options = 0x0400;
     }
 
     /* Sync current HP/PP = max for all characters (assembly lines 538-555) */
