@@ -1,5 +1,7 @@
 #include "platform/platform.h"
 #include "game/window.h"
+#include "game/overworld.h"
+#include "game/text.h"
 #include "snes/ppu.h"
 #include "include/binary.h"
 #include "game/game_state.h"
@@ -111,6 +113,15 @@ static int blit_frames;
 #define BOTTOM_WIDTH   320
 #define BOTTOM_HEIGHT  240
 
+/* Geometry of the window last drawn to the bottom screen. Kept so touch input
+ * can map a tap back to a tile inside it without duplicating the layout. */
+static struct {
+    bool    valid;
+    uint8_t window_id;
+    int     ox, oy, scale;
+    int     tiles_w, tiles_h;
+} bottom_layout;
+
 /*
  * Bottom-screen UI: draw the focused window on the bottom screen.
  *
@@ -147,6 +158,7 @@ static void draw_focused_window_to_bottom(void) {
      * so this follows the overworld menu, the battle menus and their
      * sub-menus without naming any of them. */
     const WindowInfo *w = focused_window();
+    bottom_layout.valid = false;
 
     /* Focus drops for a frame or two across menu transitions (one window
      * closing before the next takes focus), and blanking on each of those
@@ -182,6 +194,14 @@ static void draw_focused_window_to_bottom(void) {
 
     int ox = (BOTTOM_WIDTH  - out_w) / 2;
     int oy = (BOTTOM_HEIGHT - out_h) / 2;
+
+    bottom_layout.valid     = true;
+    bottom_layout.window_id = w->id;
+    bottom_layout.ox        = ox;
+    bottom_layout.oy        = oy;
+    bottom_layout.scale     = scale;
+    bottom_layout.tiles_w   = w->width;
+    bottom_layout.tiles_h   = w->height;
 
     for (int ty = 0; ty < w->height; ty++) {
         for (int tx = 0; tx < w->width; tx++) {
@@ -224,6 +244,147 @@ static void draw_focused_window_to_bottom(void) {
     }
 }
 
+
+/* ---- Bottom-screen panel -------------------------------------------------
+ *
+ * Always-present party status, composed here rather than mirrored from a game
+ * window: the HP/PP windows are only drawn when the game decides to show them
+ * (B on the overworld, or in battle), so there is nothing to copy the rest of
+ * the time. Text uses the game's own TINY font via font_get_glyph(), the same
+ * way the profiling overlay stamps its rows, so it matches the game's look
+ * without needing the window system.
+ */
+
+static inline void put_px(u16 *fb, int fbw, int x, int y, pixel_t c) {
+    if (x < 0 || x >= BOTTOM_WIDTH || y < 0 || y >= BOTTOM_HEIGHT)
+        return;
+    fb[(size_t)x * fbw + (fbw - 1 - y)] = c;
+}
+
+/* Draw one glyph run. Glyph rows are bitmasks where a CLEAR bit is ink (the
+ * convention font_get_glyph uses). Returns the advance in pixels. */
+static int draw_glyphs(u16 *fb, int fbw, int x, int y, const uint8_t *idx,
+                       int count, int scale, pixel_t color) {
+    uint8_t h = font_get_height(FONT_ID_TINY);
+    int cx = x;
+    for (int i = 0; i < count; i++) {
+        const uint8_t *glyph = font_get_glyph(FONT_ID_TINY, idx[i]);
+        uint8_t w = font_get_width(FONT_ID_TINY, idx[i]);
+        if (glyph) {
+            for (int row = 0; row < h; row++) {
+                uint8_t bits = glyph[row];
+                for (int col = 0; col < w && col < 8; col++) {
+                    if (bits & (0x80 >> col))
+                        continue;          /* set bit = background */
+                    for (int sy = 0; sy < scale; sy++)
+                        for (int sx = 0; sx < scale; sx++)
+                            put_px(fb, fbw, cx + col * scale + sx,
+                                   y + row * scale + sy, color);
+                }
+            }
+        }
+        cx += w * scale;
+    }
+    return cx - x;
+}
+
+static int draw_ascii(u16 *fb, int fbw, int x, int y, const char *str,
+                      int scale, pixel_t color) {
+    uint8_t idx[48];
+    int n = 0;
+    for (const char *s = str; *s && n < (int)sizeof(idx); s++)
+        idx[n++] = (uint8_t)(ascii_to_eb_char(*s) - 0x50);
+    return draw_glyphs(fb, fbw, x, y, idx, n, scale, color);
+}
+
+/* Names are stored EB-encoded, so they index the font directly. */
+static int draw_eb(u16 *fb, int fbw, int x, int y, const uint8_t *eb, int max,
+                   int scale, pixel_t color) {
+    uint8_t idx[16];
+    int n = 0;
+    for (int i = 0; i < max && i < (int)sizeof(idx); i++) {
+        if (eb[i] == 0x00)
+            break;
+        idx[n++] = (uint8_t)(eb[i] - 0x50);
+    }
+    return draw_glyphs(fb, fbw, x, y, idx, n, scale, color);
+}
+
+static void draw_bottom_panel(void) {
+    u16 fbw = 0, fbh = 0;
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
+    if (!fb)
+        return;
+
+    const pixel_t bg    = PIXEL_RGB(16, 16, 32);
+    const pixel_t label = PIXEL_RGB(160, 160, 176);
+    const pixel_t value = PIXEL_RGB(255, 255, 255);
+
+    for (int x = 0; x < BOTTOM_WIDTH; x++)
+        for (int y = 0; y < BOTTOM_HEIGHT; y++)
+            put_px(fb, fbw, x, y, bg);
+
+    /* font_get_glyph returns NULL until the font tiles are loaded. */
+    if (!font_get_glyph(FONT_ID_TINY, 0))
+        return;
+
+    const int scale = 2;
+    const int row_h = (font_get_height(FONT_ID_TINY) + 3) * scale;
+    int y = 10;
+
+    int count = game_state.player_controlled_party_count;
+    if (count > 4)
+        count = 4;
+
+    for (int i = 0; i < count; i++) {
+        uint8_t id = game_state.player_controlled_party_members[i];
+        if (id >= TOTAL_PARTY_COUNT)
+            continue;
+        const CharStruct *ch = &party_characters[id];
+
+        char buf[32];
+        int x = 12;
+        x += draw_eb(fb, fbw, x, y, ch->name, 5, scale, value);
+
+        x = 110;
+        x += draw_ascii(fb, fbw, x, y, "HP", scale, label);
+        snprintf(buf, sizeof(buf), " %u/%u",
+                 (unsigned)ch->current_hp, (unsigned)ch->max_hp);
+        x += draw_ascii(fb, fbw, x, y, buf, scale, value);
+
+        x = 215;
+        x += draw_ascii(fb, fbw, x, y, "PP", scale, label);
+        snprintf(buf, sizeof(buf), " %u/%u",
+                 (unsigned)ch->current_pp, (unsigned)ch->max_pp);
+        draw_ascii(fb, fbw, x, y, buf, scale, value);
+
+        y += row_h;
+    }
+}
+
+/* Map a bottom-screen touch to a tile inside the window drawn there. Returns
+ * false when nothing is drawn or the point falls outside it. */
+bool platform_bottom_hit_test(int touch_x, int touch_y, uint8_t *out_window_id,
+                              int *out_tile_col, int *out_tile_row) {
+    if (!bottom_layout.valid)
+        return false;
+
+    int lx = touch_x - bottom_layout.ox;
+    int ly = touch_y - bottom_layout.oy;
+    if (lx < 0 || ly < 0)
+        return false;
+
+    int col = lx / (8 * bottom_layout.scale);
+    int row = ly / (8 * bottom_layout.scale);
+    if (col >= bottom_layout.tiles_w || row >= bottom_layout.tiles_h)
+        return false;
+
+    if (out_window_id) *out_window_id = bottom_layout.window_id;
+    if (out_tile_col)  *out_tile_col  = col;
+    if (out_tile_row)  *out_tile_row  = row;
+    return true;
+}
+
 void platform_video_end_frame(void) {
     u16 fbw = 0, fbh = 0;
     uint64_t t0 = svcGetSystemTick();
@@ -249,10 +410,15 @@ void platform_video_end_frame(void) {
         }
     }
 
-    /* Draw the focused window on the bottom screen. Skipped while the debug
-     * console owns it (different pixel format). */
-    if (!platform_console_logging)
-        draw_focused_window_to_bottom();
+    /* Bottom screen: in battle show the game's own menu window, which is the
+     * UI that belongs down here; elsewhere show the composed status panel.
+     * Skipped while the debug console owns the screen. */
+    if (!platform_console_logging) {
+        if (ow.battle_mode)
+            draw_focused_window_to_bottom();
+        else
+            draw_bottom_panel();
+    }
 
     /* Palette readout, console mode only: the BG sub-palettes the PPU actually
      * renders from, next to the flavour that selected them. Compare against
