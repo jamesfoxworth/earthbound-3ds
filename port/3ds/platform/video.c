@@ -1,6 +1,7 @@
 #include "platform/platform.h"
 #include "game/window.h"
 #include "snes/ppu.h"
+#include "include/binary.h"
 #include "game/game_state.h"
 #include "core/types.h"
 #include <3ds.h>
@@ -111,19 +112,19 @@ static int blit_frames;
 #define BOTTOM_HEIGHT  240
 
 /*
- * Bottom-screen UI, stage 1: mirror one window to the bottom screen while it
- * still renders on top, so the two can be compared directly.
+ * Bottom-screen UI: draw the focused window on the bottom screen.
  *
- * The window's pixels are already composited into frame[] by the time
- * end_frame runs, so this copies that rectangle rather than rasterizing the
- * window's tilemap a second time. That means no second PPU pass, no scratch
- * VRAM, and no way for this to change what the top screen shows — the
- * suppression half (removing it from the top composite) is stage 2, and it is
- * the half that touches shared state.
+ * BG3 is the window layer -- 2bpp, 8x8 tiles, a 32x32 tilemap -- so this
+ * decodes that tile rectangle straight out of VRAM rather than copying the
+ * composited pixels out of frame[]. Copying was fine for proving the geometry,
+ * but it only works while the window is also drawn on top, which is precisely
+ * what stage 2 removes. Rendering from VRAM keeps the bottom screen
+ * independent of the top-screen composite, so suppression becomes a separate,
+ * small change.
  *
- * Window geometry is in 8x8 tiles. BG3 (the window layer) renders at
- * SNES_WIDTH centred in the wider viewport, so tile coordinates are offset by
- * the viewport padding to reach frame[] coordinates.
+ * Base addresses and the index-0-is-transparent rule follow ppu_render.c.
+ * Brightness (INIDISP) is deliberately not applied: the window should stay
+ * readable while the world fades.
  */
 static const WindowInfo *focused_window(void) {
     uint8_t id = win.current_focus_window;
@@ -136,55 +137,77 @@ static const WindowInfo *focused_window(void) {
     return NULL;
 }
 
-static void mirror_focused_window_to_bottom(void) {
+static void draw_focused_window_to_bottom(void) {
     u16 fbw = 0, fbh = 0;
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
     if (!fb)
         return;
 
-    /* Whichever window has focus is the one the player is interacting with,
-     * so the mirror follows the overworld menu, the battle menus and the
-     * sub-menus without naming any of them. */
-    const WindowInfo *w = focused_window();
-    if (!w || w->width == 0 || w->height == 0) {
-        memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
-        return;
-    }
-
-    /* Window geometry is in SNES-space 8x8 tiles. A centred layer (BG3, which
-     * carries the windows) always lands at +EB_VIEWPORT_PAD_LEFT; the vertical
-     * offset depends on whether anything filled the viewport, so take the one
-     * the renderer actually used. */
-    int src_x = w->x * 8 + EB_VIEWPORT_PAD_LEFT;
-    int src_y = w->y * 8 + ppu_frame_y_offset;
-    int src_w = w->width * 8;
-    int src_h = w->height * 8;
-
-    /* Clip to the staging frame. */
-    if (src_x < 0) { src_w += src_x; src_x = 0; }
-    if (src_y < 0) { src_h += src_y; src_y = 0; }
-    if (src_x + src_w > EB_VIEWPORT_WIDTH)  src_w = EB_VIEWPORT_WIDTH  - src_x;
-    if (src_y + src_h > EB_VIEWPORT_HEIGHT) src_h = EB_VIEWPORT_HEIGHT - src_y;
-    if (src_w <= 0 || src_h <= 0) {
-        memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
-        return;
-    }
-    if (src_w > BOTTOM_WIDTH)  src_w = BOTTOM_WIDTH;
-    if (src_h > BOTTOM_HEIGHT) src_h = BOTTOM_HEIGHT;
-
-    /* Centre it at 1:1 — no scaling, so the mirror is pixel-for-pixel. */
-    int dst_x = (BOTTOM_WIDTH  - src_w) / 2;
-    int dst_y = (BOTTOM_HEIGHT - src_h) / 2;
-
     memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
 
-    /* Same column-major, Y-flipped layout as the top screen. */
-    for (int x = 0; x < src_w; x++) {
-        u16 *dst = &fb[(size_t)(dst_x + x) * fbw + (fbw - 1 - dst_y)];
-        const pixel_t *src = &frame[(size_t)src_y * EB_VIEWPORT_WIDTH + src_x + x];
-        for (int y = 0; y < src_h; y++) {
-            *dst-- = *src;
-            src += EB_VIEWPORT_WIDTH;
+    /* Whichever window has focus is the one the player is interacting with,
+     * so this follows the overworld menu, the battle menus and their
+     * sub-menus without naming any of them. */
+    const WindowInfo *w = focused_window();
+    if (!w || w->width == 0 || w->height == 0)
+        return;
+
+    const uint32_t map_base  = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
+    const uint32_t tile_base = (uint32_t)(ppu.bg_nba[1] & 0x0F) * 0x2000;
+
+    int px_w = w->width * 8;
+    int px_h = w->height * 8;
+    if (px_w <= 0 || px_h <= 0)
+        return;
+
+    /* Integer scale only, so it stays pixel-exact. Doubling also makes the
+     * menus big enough to touch. */
+    int scale = (px_w * 2 <= BOTTOM_WIDTH && px_h * 2 <= BOTTOM_HEIGHT) ? 2 : 1;
+    int out_w = px_w * scale;
+    int out_h = px_h * scale;
+    if (out_w > BOTTOM_WIDTH || out_h > BOTTOM_HEIGHT)
+        return;
+
+    int ox = (BOTTOM_WIDTH  - out_w) / 2;
+    int oy = (BOTTOM_HEIGHT - out_h) / 2;
+
+    for (int ty = 0; ty < w->height; ty++) {
+        for (int tx = 0; tx < w->width; tx++) {
+            uint32_t entry_addr = map_base +
+                ((size_t)(((w->y + ty) & 31) * 32 + ((w->x + tx) & 31))) * 2;
+            if (entry_addr + 1 >= VRAM_SIZE)
+                continue;
+
+            uint16_t entry    = read_u16_le(&ppu.vram[entry_addr]);
+            uint16_t tile_num = entry & 0x3FF;
+            uint8_t  palette  = (entry >> 10) & 0x07;
+            bool     hflip    = (entry >> 14) & 1;
+            bool     vflip    = (entry >> 15) & 1;
+
+            uint32_t tile_addr = tile_base + (uint32_t)tile_num * 16;
+            if (tile_addr + 15 >= VRAM_SIZE)
+                continue;
+
+            for (int row = 0; row < 8; row++) {
+                const uint8_t *planes = &ppu.vram[tile_addr + (vflip ? 7 - row : row) * 2];
+                for (int col = 0; col < 8; col++) {
+                    int bit = 7 - (hflip ? 7 - col : col);
+                    uint8_t idx = (uint8_t)(((planes[0] >> bit) & 1) |
+                                            (((planes[1] >> bit) & 1) << 1));
+                    if (idx == 0)
+                        continue;  /* transparent */
+
+                    pixel_t c = bgr555_to_pixel(ppu.cgram[palette * 4 + idx]);
+
+                    int bx = ox + (tx * 8 + col) * scale;
+                    int by = oy + (ty * 8 + row) * scale;
+                    for (int sy = 0; sy < scale; sy++) {
+                        int yy = fbw - 1 - (by + sy);
+                        for (int sx = 0; sx < scale; sx++)
+                            fb[(size_t)(bx + sx) * fbw + yy] = c;
+                    }
+                }
+            }
         }
     }
 }
@@ -214,10 +237,10 @@ void platform_video_end_frame(void) {
         }
     }
 
-    /* Stage 1: mirror the focused window. Skipped while the debug console owns
-     * the bottom screen (different pixel format). */
+    /* Draw the focused window on the bottom screen. Skipped while the debug
+     * console owns it (different pixel format). */
     if (!platform_console_logging)
-        mirror_focused_window_to_bottom();
+        draw_focused_window_to_bottom();
 
     /* Palette readout, console mode only: the BG sub-palettes the PPU actually
      * renders from, next to the flavour that selected them. Compare against
