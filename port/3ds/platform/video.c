@@ -7,6 +7,7 @@
 #include "game/game_state.h"
 #include "core/mode_stack.h"
 #include "touch.h"
+#include "include/pad.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -365,6 +366,19 @@ static void draw_tilemap_rect(int tile_x, int tile_y,
  * convention font_get_glyph uses). Returns the advance in pixels. */
 static int font_id_cur = FONT_ID_TINY;
 
+/* The game's text tiles are opaque: convert_1bpp_to_2bpp() (text.c) maps
+ * glyph pixels to palette colour 1 and the background to colour 3, so in-game
+ * text is a solid block of near-black carrying light glyphs -- not ink over
+ * whatever is behind it. Drawing bare ink is what made the options text read
+ * as a different font. With font_cell_bg set, each glyph cell is filled first,
+ * and both colours come from live CGRAM so they follow the player's chosen
+ * window flavour. */
+static bool    font_cell_bg;
+static pixel_t font_cell_bg_c;
+
+static pixel_t game_text_ink(void)  { return bgr555_to_pixel(ppu.cgram[1]); }
+static pixel_t game_text_back(void) { return bgr555_to_pixel(ppu.cgram[3]); }
+
 static int draw_glyphs(int x, int y, const uint8_t *idx,
                        int count, int scale, pixel_t color) {
     uint8_t h = font_get_height(font_id_cur);
@@ -376,12 +390,14 @@ static int draw_glyphs(int x, int y, const uint8_t *idx,
             for (int row = 0; row < h; row++) {
                 uint8_t bits = glyph[row];
                 for (int col = 0; col < w && col < 8; col++) {
-                    if (bits & (0x80 >> col))
-                        continue;          /* set bit = background */
+                    bool ink = !(bits & (0x80 >> col));   /* clear bit = ink */
+                    if (!ink && !font_cell_bg)
+                        continue;
+                    pixel_t c = ink ? color : font_cell_bg_c;
                     for (int sy = 0; sy < scale; sy++)
                         for (int sx = 0; sx < scale; sx++)
                             img_px(cx + col * scale + sx,
-                                   y + row * scale + sy, color);
+                                   y + row * scale + sy, c);
                 }
             }
         }
@@ -494,7 +510,10 @@ static int draw_money_box(int right_x, int dest_y) {
     int text_px = measure_ascii(buf);
     int tx = inner_x + (text_px < inner_w ? inner_w - text_px : 0);
     int ty = inner_y + (inner_h - font_get_height(font_id_cur)) / 2;
-    draw_ascii(tx, ty, buf, 1, PIXEL_RGB(255, 255, 255));
+    font_cell_bg = true;
+    font_cell_bg_c = game_text_back();
+    draw_ascii(tx, ty, buf, 1, game_text_ink());
+    font_cell_bg = false;
     font_id_cur = prev;
     return MONEY_BOX_W;
 }
@@ -550,7 +569,7 @@ static int draw_settings_box(int right_x, int dest_y) {
  * These crops avoid that; the choice is left to the player. */
 int video_opt_view_width = EB_VIEWPORT_WIDTH;
 
-static const char *const view_width_names[]  = { "WIDE", "4:3", "PURE" };
+static const char *const view_width_names[]  = { "Wide", "4:3", "Pure" };
 static const int         view_width_values[] = { EB_VIEWPORT_WIDTH, 320, SNES_WIDTH };
 #define VIEW_WIDTH_COUNT ((int)(sizeof(view_width_values) / sizeof(int)))
 
@@ -565,8 +584,8 @@ typedef struct {
 bool video_opt_fps;
 
 static const OptionRow option_rows[] = {
-    { "SCREEN",     NULL,            &video_opt_view_width },
-    { "FPS METER",  &video_opt_fps,  NULL },
+    { "Screen",     NULL,            &video_opt_view_width },
+    { "FPS meter",  &video_opt_fps,  NULL },
 };
 #define OPTION_ROW_COUNT ((int)(sizeof(option_rows) / sizeof(option_rows[0])))
 
@@ -594,17 +613,19 @@ static void draw_options_panel(void) {
 
     draw_window_box(OPT_TILES_W, OPT_TILES_H, OPT_X, OPT_Y);
 
-    const pixel_t ink = PIXEL_RGB(255, 255, 255);
-    const pixel_t dim = PIXEL_RGB(150, 150, 165);
-    draw_ascii(OPT_X + 10, OPT_LINE_Y(0), "OPTIONS", 1, ink);
+    font_cell_bg = true;
+    font_cell_bg_c = game_text_back();
+    const pixel_t ink = game_text_ink();
+    const pixel_t dim = ink;
+    draw_ascii(OPT_X + 10, OPT_LINE_Y(0), "Options", 1, ink);
 
     for (int i = 0; i < OPTION_ROW_COUNT; i++) {
         const OptionRow *r = &option_rows[i];
         int y = OPT_LINE_Y(i + 1);
         bool on = r->flag ? *r->flag : (*r->cycle != EB_VIEWPORT_WIDTH);
-        const char *v = "OFF";
+        const char *v = "Off";
         if (r->flag) {
-            v = on ? "ON" : "OFF";
+            v = on ? "On" : "Off";
         } else {
             for (int k = 0; k < VIEW_WIDTH_COUNT; k++)
                 if (view_width_values[k] == *r->cycle)
@@ -614,7 +635,8 @@ static void draw_options_panel(void) {
         draw_ascii(OPT_X + OPT_W - 10 - measure_ascii(v), y, v, 1,
                    on ? ink : dim);
     }
-    draw_ascii(OPT_X + 10, OPT_LINE_Y(OPTION_ROW_COUNT + 1), "CLOSE", 1, dim);
+    draw_ascii(OPT_X + 10, OPT_LINE_Y(OPTION_ROW_COUNT + 1), "Close", 1, dim);
+    font_cell_bg = false;
     font_id_cur = prev;
 }
 
@@ -648,6 +670,73 @@ static bool options_handle_touch(const TouchState *t) {
                  OPT_W, OPT_ROW_H))
         options_open = false;
     return true;   /* swallow taps inside the panel */
+}
+
+/* The cards sit at the same Y in both contexts -- draw_battle_bottom() uses
+ * 6, and a different overworld Y made them jump on every battle transition.
+ * The money/settings row therefore goes to the BOTTOM right: with four cards
+ * centred the top-right corner is only ~48px wide, too narrow for the money
+ * box's fixed 64. */
+#define HPPP_CARDS_Y      6
+#define HPPP_STATUSROW_Y  (BOTTOM_HEIGHT - MONEY_BOX_H - 6)
+
+/* ---- Command hub ---------------------------------------------------------
+ *
+ * Each entry injects the pad press the game already binds, so the real mode
+ * is pushed by the game's own input handler at its own yield boundary -- the
+ * port never reaches into the mode stack. Per-character drilling (tap a card
+ * for that character's Goods/PSI) needs the pause menu to accept a
+ * preselected character, which these entry points do not take yet. */
+typedef struct {
+    const char *label;
+    uint16_t    pad;
+    int         x, y, w, h;
+} HubButton;
+
+#define HUB_COUNT   3
+#define HUB_TILES_W 11
+#define HUB_BOX_W   (HUB_TILES_W * 8)
+#define HUB_BOX_H   (4 * 8)
+#define HUB_Y       (HPPP_CARDS_Y + HPPP_WINDOW_HEIGHT * 8 + 10)
+
+static HubButton hub[HUB_COUNT] = {
+    { "Menu", PAD_A, 0, 0, 0, 0 },
+    { "Map",  PAD_X, 0, 0, 0, 0 },
+    { "Talk", PAD_L, 0, 0, 0, 0 },
+};
+
+static void draw_hub(void) {
+    int prev = font_id_cur;
+    font_id_cur = FONT_ID_NORMAL;
+    if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
+
+    const int gap = (BOTTOM_WIDTH - HUB_COUNT * HUB_BOX_W) / (HUB_COUNT + 1);
+    font_cell_bg = true;
+    font_cell_bg_c = game_text_back();
+    for (int i = 0; i < HUB_COUNT; i++) {
+        int x = gap + i * (HUB_BOX_W + gap);
+        hub[i].x = x; hub[i].y = HUB_Y;
+        hub[i].w = HUB_BOX_W; hub[i].h = HUB_BOX_H;
+        draw_window_box(HUB_TILES_W, 4, x, HUB_Y);
+        int tw = measure_ascii(hub[i].label);
+        draw_ascii(x + (HUB_BOX_W - tw) / 2,
+                   HUB_Y + 8 + (16 - font_get_height(font_id_cur)) / 2,
+                   hub[i].label, 1, game_text_ink());
+    }
+    font_cell_bg = false;
+    font_id_cur = prev;
+}
+
+static bool hub_handle_touch(const TouchState *t) {
+    if (!t->pressed)
+        return false;
+    for (int i = 0; i < HUB_COUNT; i++) {
+        if (hub[i].w && touch_in(t, hub[i].x, hub[i].y, hub[i].w, hub[i].h)) {
+            input_pulse_pad(hub[i].pad);
+            return true;
+        }
+    }
+    return false;
 }
 
 static const WindowInfo *routed_menu_window(void) {
@@ -718,13 +807,6 @@ static void draw_battle_bottom(void) {
  * Returns 0 if nothing could be drawn (no party yet, or the window tiles are
  * not resident), so the caller can fall back to the composed text panel. */
 #define HPPP_OW_MARGIN_X  6
-/* The cards sit at the same Y in both contexts -- draw_battle_bottom() uses
- * 6, and a different overworld Y made them jump on every battle transition.
- * The money/settings row therefore goes to the BOTTOM right: with four cards
- * centred the top-right corner is only ~48px wide, too narrow for the money
- * box's fixed 64. */
-#define HPPP_CARDS_Y      6
-#define HPPP_STATUSROW_Y  (BOTTOM_HEIGHT - MONEY_BOX_H - 6)
 #define HPPP_SHADOW_ROW0  ACTIVE_HPPP_WINDOW_Y_OFFSET
 #define HPPP_SHADOW_ROWS  (HPPP_WINDOW_HEIGHT + 2)
 
@@ -813,6 +895,8 @@ static void draw_bottom_panel(void) {
 
     /* The game's own HP/PP panels, identical to the battle ones, centred. */
     bool have_cards = draw_overworld_hppp(HPPP_CARDS_Y) > 0;
+    if (have_cards)
+        draw_hub();
     if (options_open)
         draw_options_panel();
     if (have_cards)
@@ -950,6 +1034,8 @@ void platform_video_end_frame(void) {
                        touch_in(t, settings_hit_x, settings_hit_y,
                                 settings_hit_w, settings_hit_h)) {
                 options_open = true;
+                touch_dirty = true;
+            } else if (hub_handle_touch(t)) {
                 touch_dirty = true;
             }
         } else if (options_open) {

@@ -26,6 +26,12 @@ const TouchState *touch_get(void);
  * toggle. */
 void input_pulse_fps_toggle(void);
 
+/* Inject a one-frame pad press. The game edge-detects into core.pad1_pressed,
+ * so this is indistinguishable from the player pressing the button -- which is
+ * what lets the bottom-screen hub drive the real menus without the port
+ * reaching into the mode stack itself. */
+void input_pulse_pad(uint16_t bits);
+
 /* True when (x,y) falls inside the rect; convenience for hit-testing. */
 static inline bool touch_in(const TouchState *t, int x, int y, int w, int h) {
     return t->x >= x && t->x < x + w && t->y >= y && t->y < y + h;

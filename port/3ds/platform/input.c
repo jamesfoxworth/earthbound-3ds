@@ -21,6 +21,9 @@ const TouchState *touch_get(void) { return &touch; }
 static bool fps_toggle_pulse;
 void input_pulse_fps_toggle(void) { fps_toggle_pulse = true; }
 
+static uint16_t pad_pulse;
+void input_pulse_pad(uint16_t bits) { pad_pulse |= bits; }
+
 bool platform_input_init(void) {
     pad_state = 0;
     pad_prev = 0;
@@ -59,6 +62,12 @@ void platform_input_poll(void) {
     if (held & KEY_DOWN)   p |= PAD_DOWN;
     if (held & KEY_LEFT)   p |= PAD_LEFT;
     if (held & KEY_RIGHT)  p |= PAD_RIGHT;
+    /* Virtual presses from the bottom-screen hub, held for exactly one poll
+     * so the game sees a clean press edge. OR'd in after the real pad so a
+     * physical press is never masked. */
+    p |= pad_pulse;
+    pad_pulse = 0;
+
     pad_state = p;
 
     /* Touching the bottom screen toggles the FPS/profiling overlay (the
