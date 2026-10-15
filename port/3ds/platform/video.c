@@ -123,7 +123,10 @@ static struct {
 
 static void suppress_apply(void) {
     suppress.active = false;
-    if (platform_console_logging || !ow.battle_mode)
+    /* The swirl drives per-scanline layer control of its own while entering or
+     * leaving battle; masking BG3 out from under it renders it glitchy. Leave
+     * the register alone until the swirl is done. */
+    if (platform_console_logging || !ow.battle_mode || ow.battle_swirl_countdown)
         return;
 
     suppress.active = true;
@@ -176,14 +179,6 @@ static int blit_frames;
 #define BOTTOM_WIDTH   320
 #define BOTTOM_HEIGHT  240
 
-/* Geometry of the window last drawn to the bottom screen. Kept so touch input
- * can map a tap back to a tile inside it without duplicating the layout. */
-static struct {
-    bool    valid;
-    uint8_t window_id;
-    int     ox, oy, scale;
-    int     tiles_w, tiles_h;
-} bottom_layout;
 
 /*
  * Bottom-screen UI: draw the focused window on the bottom screen.
@@ -211,10 +206,35 @@ static const WindowInfo *focused_window(void) {
     return NULL;
 }
 
-static inline void put_px(u16 *fb, int fbw, int x, int y, pixel_t c) {
+/* The bottom screen is composed into this image and then blitted whole, every
+ * frame. Drawing straight into the framebuffer does not work with double
+ * buffering unless every pixel is written every frame: updating only the
+ * elements that changed left the two buffers holding different pictures, which
+ * showed as a black wave across the panels, jitter, and the previous
+ * context's UI (the overworld panel) surviving underneath the battle UI.
+ * Keeping the image here also means an element whose source is mid-redraw can
+ * simply be skipped, retaining its last good pixels. */
+static pixel_t bottom_img[BOTTOM_WIDTH * BOTTOM_HEIGHT];
+
+static inline void img_px(int x, int y, pixel_t c) {
     if (x < 0 || x >= BOTTOM_WIDTH || y < 0 || y >= BOTTOM_HEIGHT)
         return;
-    fb[(size_t)x * fbw + (fbw - 1 - y)] = c;
+    bottom_img[(size_t)y * BOTTOM_WIDTH + x] = c;
+}
+
+static void present_bottom(void) {
+    u16 fbw = 0, fbh = 0;
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
+    if (!fb)
+        return;
+    for (int x = 0; x < BOTTOM_WIDTH; x++) {
+        u16 *dst = &fb[(size_t)x * fbw + (fbw - 1)];
+        const pixel_t *src = &bottom_img[x];
+        for (int y = 0; y < BOTTOM_HEIGHT; y++) {
+            *dst-- = *src;
+            src += BOTTOM_WIDTH;
+        }
+    }
 }
 
 /* True when every tilemap entry in the rectangle is zero, i.e. the window code
@@ -238,10 +258,10 @@ static bool tilemap_rect_blank(int tile_x, int tile_y, int tiles_w, int tiles_h)
 
 /* Fill a destination rectangle, used before redrawing one element so stale
  * pixels do not show through. */
-static void fill_rect(u16 *fb, int fbw, int x, int y, int w, int h, pixel_t c) {
+static void fill_rect(int x, int y, int w, int h, pixel_t c) {
     for (int iy = 0; iy < h; iy++)
         for (int ix = 0; ix < w; ix++)
-            put_px(fb, fbw, x + ix, y + iy, c);
+            img_px(x + ix, y + iy, c);
 }
 
 /* Rasterise a rectangle of the BG3 tilemap to the bottom screen. BG3 is the
@@ -249,7 +269,7 @@ static void fill_rect(u16 *fb, int fbw, int x, int y, int w, int h, pixel_t c) {
  * drawn can be redrawn here from the game's own tiles. Base addresses and the
  * index-0-is-transparent rule follow ppu_render.c. Brightness is deliberately
  * not applied so the panel stays readable while the world fades. */
-static void draw_tilemap_rect(u16 *fb, int fbw, int tile_x, int tile_y,
+static void draw_tilemap_rect(int tile_x, int tile_y,
                               int tiles_w, int tiles_h,
                               int dest_x, int dest_y, int scale) {
     const uint32_t map_base  = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
@@ -287,7 +307,7 @@ static void draw_tilemap_rect(u16 *fb, int fbw, int tile_x, int tile_y,
                     int by = dest_y + (ty * 8 + row) * scale;
                     for (int sy = 0; sy < scale; sy++)
                         for (int sx = 0; sx < scale; sx++)
-                            put_px(fb, fbw, bx + sx, by + sy, c);
+                            img_px(bx + sx, by + sy, c);
                 }
             }
         }
@@ -307,7 +327,7 @@ static void draw_tilemap_rect(u16 *fb, int fbw, int tile_x, int tile_y,
 
 /* Draw one glyph run. Glyph rows are bitmasks where a CLEAR bit is ink (the
  * convention font_get_glyph uses). Returns the advance in pixels. */
-static int draw_glyphs(u16 *fb, int fbw, int x, int y, const uint8_t *idx,
+static int draw_glyphs(int x, int y, const uint8_t *idx,
                        int count, int scale, pixel_t color) {
     uint8_t h = font_get_height(FONT_ID_TINY);
     int cx = x;
@@ -322,7 +342,7 @@ static int draw_glyphs(u16 *fb, int fbw, int x, int y, const uint8_t *idx,
                         continue;          /* set bit = background */
                     for (int sy = 0; sy < scale; sy++)
                         for (int sx = 0; sx < scale; sx++)
-                            put_px(fb, fbw, cx + col * scale + sx,
+                            img_px(cx + col * scale + sx,
                                    y + row * scale + sy, color);
                 }
             }
@@ -332,17 +352,17 @@ static int draw_glyphs(u16 *fb, int fbw, int x, int y, const uint8_t *idx,
     return cx - x;
 }
 
-static int draw_ascii(u16 *fb, int fbw, int x, int y, const char *str,
+static int draw_ascii(int x, int y, const char *str,
                       int scale, pixel_t color) {
     uint8_t idx[48];
     int n = 0;
     for (const char *s = str; *s && n < (int)sizeof(idx); s++)
         idx[n++] = (uint8_t)(ascii_to_eb_char(*s) - 0x50);
-    return draw_glyphs(fb, fbw, x, y, idx, n, scale, color);
+    return draw_glyphs(x, y, idx, n, scale, color);
 }
 
 /* Names are stored EB-encoded, so they index the font directly. */
-static int draw_eb(u16 *fb, int fbw, int x, int y, const uint8_t *eb, int max,
+static int draw_eb(int x, int y, const uint8_t *eb, int max,
                    int scale, pixel_t color) {
     uint8_t idx[16];
     int n = 0;
@@ -351,7 +371,7 @@ static int draw_eb(u16 *fb, int fbw, int x, int y, const uint8_t *eb, int max,
             break;
         idx[n++] = (uint8_t)(eb[i] - 0x50);
     }
-    return draw_glyphs(fb, fbw, x, y, idx, n, scale, color);
+    return draw_glyphs(x, y, idx, n, scale, color);
 }
 
 /* The window shown on the bottom screen, or NULL. With the window layer off
@@ -367,7 +387,7 @@ static const WindowInfo *routed_menu_window(void) {
 /* Battle: the four HP/PP panels across the top, the focused menu window
  * beneath them -- the game has already drawn both into the window layer, so
  * these are its own panels, not a reconstruction. */
-static void draw_battle_bottom(u16 *fb, int fbw) {
+static void draw_battle_bottom(void) {
     const pixel_t bg = PIXEL_RGB(0, 0, 0);
 
     int count = game_state.player_controlled_party_count;
@@ -387,15 +407,15 @@ static void draw_battle_bottom(u16 *fb, int fbw) {
         if (tilemap_rect_blank(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT))
             continue;   /* mid-redraw: keep what is already shown */
         int dx = ox + i * panel_px_w;
-        fill_rect(fb, fbw, dx, 6, panel_px_w, panel_px_h, bg);
-        draw_tilemap_rect(fb, fbw, tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
+        fill_rect(dx, 6, panel_px_w, panel_px_h, bg);
+        draw_tilemap_rect(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
                           dx, 6, 1);
     }
 
     int my = 6 + panel_px_h + 10;
     const WindowInfo *w = routed_menu_window();
     if (!w) {
-        fill_rect(fb, fbw, 0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
+        fill_rect(0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
         return;
     }
 
@@ -406,24 +426,17 @@ static void draw_battle_bottom(u16 *fb, int fbw) {
     if (tilemap_rect_blank(w->x, w->y, w->width, w->height))
         return;
 
-    fill_rect(fb, fbw, 0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
-    draw_tilemap_rect(fb, fbw, w->x, w->y, w->width, w->height,
+    fill_rect(0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
+    draw_tilemap_rect(w->x, w->y, w->width, w->height,
                       (BOTTOM_WIDTH - menu_w) / 2, my, 1);
 }
 
 static void draw_bottom_panel(void) {
-    u16 fbw = 0, fbh = 0;
-    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fbw, &fbh);
-    if (!fb)
-        return;
-
     const pixel_t bg    = PIXEL_RGB(16, 16, 32);
     const pixel_t label = PIXEL_RGB(160, 160, 176);
     const pixel_t value = PIXEL_RGB(255, 255, 255);
 
-    for (int x = 0; x < BOTTOM_WIDTH; x++)
-        for (int y = 0; y < BOTTOM_HEIGHT; y++)
-            put_px(fb, fbw, x, y, bg);
+    fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, bg);
 
     /* font_get_glyph returns NULL until the font tiles are loaded. */
     if (!font_get_glyph(FONT_ID_TINY, 0))
@@ -445,19 +458,19 @@ static void draw_bottom_panel(void) {
 
         char buf[32];
         int x = 12;
-        x += draw_eb(fb, fbw, x, y, ch->name, 5, scale, value);
+        x += draw_eb(x, y, ch->name, 5, scale, value);
 
         x = 110;
-        x += draw_ascii(fb, fbw, x, y, "HP", scale, label);
+        x += draw_ascii(x, y, "HP", scale, label);
         snprintf(buf, sizeof(buf), " %u/%u",
                  (unsigned)ch->current_hp, (unsigned)ch->max_hp);
-        x += draw_ascii(fb, fbw, x, y, buf, scale, value);
+        x += draw_ascii(x, y, buf, scale, value);
 
         x = 215;
-        x += draw_ascii(fb, fbw, x, y, "PP", scale, label);
+        x += draw_ascii(x, y, "PP", scale, label);
         snprintf(buf, sizeof(buf), " %u/%u",
                  (unsigned)ch->current_pp, (unsigned)ch->max_pp);
-        draw_ascii(fb, fbw, x, y, buf, scale, value);
+        draw_ascii(x, y, buf, scale, value);
 
         y += row_h;
     }
@@ -465,27 +478,6 @@ static void draw_bottom_panel(void) {
 
 /* Map a bottom-screen touch to a tile inside the window drawn there. Returns
  * false when nothing is drawn or the point falls outside it. */
-bool platform_bottom_hit_test(int touch_x, int touch_y, uint8_t *out_window_id,
-                              int *out_tile_col, int *out_tile_row) {
-    if (!bottom_layout.valid)
-        return false;
-
-    int lx = touch_x - bottom_layout.ox;
-    int ly = touch_y - bottom_layout.oy;
-    if (lx < 0 || ly < 0)
-        return false;
-
-    int col = lx / (8 * bottom_layout.scale);
-    int row = ly / (8 * bottom_layout.scale);
-    if (col >= bottom_layout.tiles_w || row >= bottom_layout.tiles_h)
-        return false;
-
-    if (out_window_id) *out_window_id = bottom_layout.window_id;
-    if (out_tile_col)  *out_tile_col  = col;
-    if (out_tile_row)  *out_tile_row  = row;
-    return true;
-}
-
 void platform_video_end_frame(void) {
     u16 fbw = 0, fbh = 0;
     uint64_t t0 = svcGetSystemTick();
@@ -517,14 +509,22 @@ void platform_video_end_frame(void) {
     suppress_restore();
 
     if (!platform_console_logging) {
-        if (ow.battle_mode) {
-            u16 bw = 0, bh = 0;
-            u16 *bfb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
-            if (bfb)
-                draw_battle_bottom(bfb, bw);
-        } else {
-            draw_bottom_panel();
+        /* Switching between the battle layout and the overworld panel leaves
+         * the previous context's pixels behind, since elements only clear
+         * their own rectangles. Wipe the image on the transition. */
+        static int last_context = -1;
+        int context = ow.battle_mode ? 1 : 0;
+        if (context != last_context) {
+            memset(bottom_img, 0, sizeof(bottom_img));
+            last_context = context;
         }
+
+        if (context)
+            draw_battle_bottom();
+        else
+            draw_bottom_panel();
+
+        present_bottom();
     }
 
     /* Palette readout, console mode only: the BG sub-palettes the PPU actually
