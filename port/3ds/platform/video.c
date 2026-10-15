@@ -440,8 +440,26 @@ static void draw_window_box(int tiles_w, int tiles_h, int dest_x, int dest_y) {
                           dest_x, dest_y, 1);
 }
 
-/* Carried money, in the same box the B menu shows it in. */
-static void draw_money_box(int dest_x, int dest_y) {
+static int measure_ascii(const char *str) {
+    int px = 0;
+    for (const char *c = str; *c; c++)
+        px += font_get_width(font_id_cur,
+                             (uint8_t)(ascii_to_eb_char(*c) - 0x50));
+    return px;
+}
+
+/* Interior tile rows needed for one line of the current font. Glyphs draw
+ * downward from the top-left, so a box sized without consulting the font
+ * height puts the text through the bottom border. */
+static int box_rows_for_font(void) {
+    int h = font_get_height(font_id_cur);
+    int rows = (h + 7) / 8;
+    return rows < 1 ? 1 : rows;
+}
+
+/* Carried money, in the game's window frame. Returns the box width in
+ * pixels so the caller can right-align a row of them. */
+static int draw_money_box(int right_x, int dest_y) {
     char buf[16];
     snprintf(buf, sizeof(buf), "$%lu", (unsigned long)game_state.money_carried);
 
@@ -449,14 +467,47 @@ static void draw_money_box(int dest_x, int dest_y) {
     font_id_cur = FONT_ID_NORMAL;
     if (!font_get_glyph(font_id_cur, 0)) {   /* main font not resident yet */
         font_id_cur = prev;
-        return;
+        return 0;
     }
 
-    int tiles_w = 2 + (int)strlen(buf);
-    if (tiles_w > 12) tiles_w = 12;
-    draw_window_box(tiles_w, 3, dest_x, dest_y);
-    draw_ascii(dest_x + 8, dest_y + 8, buf, 1, PIXEL_RGB(255, 255, 255));
+    int rows = box_rows_for_font();
+    int text_px = measure_ascii(buf);
+    int tiles_w = 2 + (text_px + 7) / 8;
+    if (tiles_w > 14) tiles_w = 14;
+
+    int box_w = tiles_w * 8;
+    int x = right_x - box_w;
+    draw_window_box(tiles_w, rows + 2, x, dest_y);
+    /* Centre the line in the interior rather than pinning it to the top. */
+    int ty = dest_y + 8 + (rows * 8 - font_get_height(font_id_cur)) / 2;
+    draw_ascii(x + 8, ty, buf, 1, PIXEL_RGB(255, 255, 255));
     font_id_cur = prev;
+    return box_w;
+}
+
+/* Settings entry. Not interactive yet -- touch input still has to be put
+ * back -- so this is the placeholder the hub will hang off. */
+static int draw_settings_box(int right_x, int dest_y, int rows) {
+    const int tiles_w = 4;
+    const int box_w = tiles_w * 8;
+    int x = right_x - box_w;
+    draw_window_box(tiles_w, rows + 2, x, dest_y);
+
+    const pixel_t ink = PIXEL_RGB(255, 255, 255);
+    int cx = x + box_w / 2;
+    int cy = dest_y + 8 + (rows * 8) / 2;
+    for (int dy = -7; dy <= 7; dy++) {
+        for (int dx = -7; dx <= 7; dx++) {
+            int d2 = dx * dx + dy * dy;
+            bool ring = (d2 <= 36 && d2 >= 12);
+            bool tooth = (d2 <= 49 && d2 > 36) &&
+                         ((dx > -2 && dx < 2) || (dy > -2 && dy < 2) ||
+                          (dx == dy) || (dx == -dy));
+            if (ring || tooth)
+                img_px(cx + dx, cy + dy, ink);
+        }
+    }
+    return box_w;
 }
 
 static const WindowInfo *routed_menu_window(void) {
@@ -527,6 +578,8 @@ static void draw_battle_bottom(void) {
  * Returns 0 if nothing could be drawn (no party yet, or the window tiles are
  * not resident), so the caller can fall back to the composed text panel. */
 #define HPPP_OW_MARGIN_X  6
+#define HPPP_TOPROW_Y     4
+#define HPPP_CARDS_Y      44
 #define HPPP_SHADOW_ROW0  ACTIVE_HPPP_WINDOW_Y_OFFSET
 #define HPPP_SHADOW_ROWS  (HPPP_WINDOW_HEIGHT + 2)
 
@@ -539,7 +592,7 @@ static int draw_overworld_hppp(int dest_y) {
     /* Outside battle the cards sit left, leaving the top right for the money
      * box and (later) the options entry. Battle keeps its centred row. */
     const int panel_px_w0 = HPPP_WINDOW_WIDTH * 8;
-    const int ox0 = HPPP_OW_MARGIN_X;
+    const int ox0 = (BOTTOM_WIDTH - count * panel_px_w0) / 2;
 
     /* The game is already rendering its own HP/PP windows (the B menu), so
      * they are live in VRAM. Read those rather than running a second draw --
@@ -578,7 +631,7 @@ static int draw_overworld_hppp(int dest_y) {
         draw_hp_pp_window((uint16_t)i);
 
     const int panel_px_w = HPPP_WINDOW_WIDTH * 8;
-    const int ox = HPPP_OW_MARGIN_X;
+    const int ox = (BOTTOM_WIDTH - count * panel_px_w) / 2;
     const int ty = NORMAL_HPPP_WINDOW_Y_OFFSET;
 
     int drawn = 0;
@@ -606,17 +659,21 @@ static void draw_bottom_panel(void) {
 
     fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, bg);
 
-    /* Preferred: the game's own HP/PP panels, identical to the battle ones,
-     * left-aligned with the money box in the top right. */
-    if (draw_overworld_hppp(6) > 0) {
-        int count = game_state.player_controlled_party_count;
-        if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
-        int cards_right = HPPP_OW_MARGIN_X + count * HPPP_WINDOW_WIDTH * 8;
-        int mx = cards_right + 8;
-        if (mx < BOTTOM_WIDTH - 8)
-            draw_money_box(mx, 6);
+    /* Top-right status row: settings at the corner, money to its left.
+     * Kept on its own row above the cards so it never sits beside a card. */
+    int right = BOTTOM_WIDTH - HPPP_OW_MARGIN_X;
+    int prev_font = font_id_cur;
+    font_id_cur = FONT_ID_NORMAL;
+    int rows = font_get_glyph(font_id_cur, 0) ? box_rows_for_font() : 2;
+    font_id_cur = prev_font;
+
+    right -= draw_settings_box(right, HPPP_TOPROW_Y, rows);
+    right -= 4;
+    draw_money_box(right, HPPP_TOPROW_Y);
+
+    /* The game's own HP/PP panels, identical to the battle ones, centred. */
+    if (draw_overworld_hppp(HPPP_CARDS_Y) > 0)
         return;
-    }
 
     /* Fallback -- composed text, used before the window tiles are resident
      * (title screen, file select, the first frames of a load). */
