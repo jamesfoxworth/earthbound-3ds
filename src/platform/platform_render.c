@@ -20,6 +20,10 @@ static void send_scanline_with_stamp(int y, const pixel_t *pixels) {
 
 int platform_visible_width = EB_VIEWPORT_WIDTH;
 
+HostModeRequest host_mode_request = HOST_MODE_REQ_NONE;
+uint16_t host_mode_req_a;
+uint16_t host_mode_req_b;
+
 void platform_render_frame(scanline_stamp_cb_t fps_overlay_cb) {
     platform_video_begin_frame();
 

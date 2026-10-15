@@ -9,6 +9,8 @@
 #include "touch.h"
 #include "include/pad.h"
 #include "game/inventory.h"
+
+#define WINDOW_IN_BATTLE_TEXT 0x0E
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -369,11 +371,14 @@ static void draw_tilemap_rect(int tile_x, int tile_y,
 
 /* Draw one glyph run. Glyph rows are bitmasks where a CLEAR bit is ink (the
  * convention font_get_glyph uses). Returns the advance in pixels. */
-/* The game composites the party-name tiles in the HP/PP cards with
- * FONT_ID_BATTLE (text.c load_window_gfx), and those cards sit directly above
- * these panels, so the panels use the same face. FONT_ID_NORMAL is the
- * dialogue font and looked subtly wrong next to them. */
-#define EB_PANEL_FONT FONT_ID_BATTLE
+/* The dialogue font, which is also the menu font and very nearly all text in
+ * the game. FONT_ID_BATTLE is what the HP/PP cards composite their party-name
+ * tiles with, so it matches the cards -- but not anything else, which is why
+ * it looked wrong. Window TITLES are a separate case: the game renders those
+ * with FONT_ID_TINY into the top border row (render_title_to_vram ->
+ * RENDER_TINY_FONT_STRING), so EB_TITLE_FONT is used for them. */
+#define EB_PANEL_FONT FONT_ID_NORMAL
+#define EB_TITLE_FONT FONT_ID_TINY
 
 static int font_id_cur = FONT_ID_TINY;
 
@@ -725,6 +730,13 @@ static bool options_handle_touch(const TouchState *t) {
 #define GOODS_ITEM_MAX  14      /* CharStruct.items[14] */
 
 static int goods_character;   /* party slot, not member id */
+static bool goods_psi_tab;    /* false = Goods, true = PSI */
+
+/* Item slot hit rects, filled in as the list is drawn, so a tap maps back to
+ * the inventory slot the game expects. */
+static struct { int x, y, w, h; uint8_t slot; } item_hit[GOODS_ITEM_MAX];
+static int item_hit_count;
+static int tab_hit_x, tab_hit_y, tab_hit_w, tab_hit_h;
 
 /* Card hit rects, filled in as the cards are drawn. */
 static struct { int x, y, w, h; } card_hit[HPPP_MAX_PARTY];
@@ -752,32 +764,59 @@ static void draw_goods_panel(void) {
     font_cell_bg_c = game_text_back();
     const pixel_t ink = game_text_ink();
 
+    /* The character's name goes in the top border row, the way the game's
+     * own menu windows carry their title -- not as a first list line, which
+     * read like an inventory entry. The game uses the tiny font for titles
+     * and the border row is 8px, so the tiny font is also what fits. */
+    font_id_cur = EB_TITLE_FONT;
+    int titlex = GOODS_X + 8;
+    titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
+    /* Tab marker sits in the title row too, so the list keeps the whole
+     * interior. Tapping it swaps Goods <-> PSI. */
+    const char *tab = goods_psi_tab ? "PSI" : "Goods";
+    tab_hit_x = titlex + 8; tab_hit_y = GOODS_Y;
+    tab_hit_w = measure_ascii(tab) + 8; tab_hit_h = 8;
+    draw_ascii(tab_hit_x, GOODS_Y, tab, 1, ink);
+    font_id_cur = EB_PANEL_FONT;
+
     /* Derive the row count from the real font height rather than assuming
      * one -- a fixed 7 rows overflowed the window's bottom border. Whatever
      * fits, fits; if the font is tall enough that all 14 do not, the list is
      * simply shorter rather than drawn outside the frame. */
     const int line_h = font_get_height(font_id_cur) + 1;
     const int interior_h = (GOODS_TILES_H - 2) * 8;
-    int rows = (interior_h - line_h) / line_h;
+    int rows = interior_h / line_h;
     if (rows < 1) rows = 1;
     if (rows > (GOODS_ITEM_MAX + GOODS_COLS - 1) / GOODS_COLS)
         rows = (GOODS_ITEM_MAX + GOODS_COLS - 1) / GOODS_COLS;
 
-    int hx = GOODS_X + 8, hy = GOODS_Y + 8;
-    hx += draw_eb(hx, hy, ch->name, 5, 1, ink);
-    draw_ascii(hx + 6, hy, "- Goods", 1, ink);
-
+    const int hy = GOODS_Y + 8;
     const int col_w = (GOODS_BOX_W - 16) / GOODS_COLS;
-    for (int i = 0; i < GOODS_COLS * rows && i < GOODS_ITEM_MAX; i++) {
-        uint8_t id = ch->items[i];
-        if (id == 0)
-            continue;
-        const ItemConfig *it = get_item_entry(id);
-        if (!it)
-            continue;
-        int cx = GOODS_X + 8 + (i / rows) * col_w;
-        int cy = hy + line_h + (i % rows) * line_h;
-        draw_eb(cx, cy, it->name, ITEM_NAME_LEN, 1, ink);
+    item_hit_count = 0;
+
+    if (goods_psi_tab) {
+        /* PSI list. Display only for now -- the two-tap cast still needs the
+         * PSI menu's execution phases checked for the window state they
+         * assume, so nothing is wired to a tap yet. */
+        draw_ascii(GOODS_X + 8, hy, "PSI list coming next", 1, ink);
+    } else {
+        for (int i = 0; i < GOODS_COLS * rows && i < GOODS_ITEM_MAX; i++) {
+            uint8_t id = ch->items[i];
+            if (id == 0)
+                continue;
+            const ItemConfig *it = get_item_entry(id);
+            if (!it)
+                continue;
+            int cx = GOODS_X + 8 + (i / rows) * col_w;
+            int cy = hy + (i % rows) * line_h;
+            draw_eb(cx, cy, it->name, ITEM_NAME_LEN, 1, ink);
+            item_hit[item_hit_count].x = cx;
+            item_hit[item_hit_count].y = cy;
+            item_hit[item_hit_count].w = col_w;
+            item_hit[item_hit_count].h = line_h;
+            item_hit[item_hit_count].slot = (uint8_t)i;
+            item_hit_count++;
+        }
     }
 
     font_cell_bg = false;
@@ -788,10 +827,31 @@ static void draw_goods_panel(void) {
 static bool goods_handle_touch(const TouchState *t) {
     if (!t->pressed)
         return false;
+
     for (int i = 0; i < card_hit_count; i++) {
         if (touch_in(t, card_hit[i].x, card_hit[i].y,
                      card_hit[i].w, card_hit[i].h)) {
             goods_character = i;
+            return true;
+        }
+    }
+    if (tab_hit_w && touch_in(t, tab_hit_x, tab_hit_y, tab_hit_w, tab_hit_h)) {
+        goods_psi_tab = !goods_psi_tab;
+        return true;
+    }
+    /* Tapping an item hands the game the same inputs the Goods menu would:
+     * GAME_MODE_USE_ITEM classifies usability, shows the check/description
+     * text and runs targeting itself, so Cookies heal, Cold Remedy cures and
+     * an unusable item just reports why -- all the game's own rules. */
+    for (int i = 0; i < item_hit_count; i++) {
+        if (touch_in(t, item_hit[i].x, item_hit[i].y,
+                     item_hit[i].w, item_hit[i].h)) {
+            int count = game_state.player_controlled_party_count;
+            if (goods_character < count) {
+                host_mode_req_a = (uint16_t)(goods_character + 1); /* 1-based */
+                host_mode_req_b = item_hit[i].slot;
+                host_mode_request = HOST_MODE_REQ_USE_ITEM;
+            }
             return true;
         }
     }
@@ -834,9 +894,22 @@ static void draw_battle_bottom(void) {
                           dx, 6, 1);
     }
 
-    int my = 6 + panel_px_h + 10;
+    /* Battle dialogue goes in the same slot the overworld panel occupies, so
+     * the two contexts read as one layout. WINDOW_IN_BATTLE_TEXT is widened
+     * in window_configs for this (see the note there). */
+    int my = 6 + panel_px_h + 6;
+    const WindowInfo *tw = get_window(WINDOW_IN_BATTLE_TEXT);
+    if (tw && tw->width && tw->height &&
+        !tilemap_rect_blank(tw->x, tw->y, tw->width, tw->height)) {
+        int tw_px = tw->width * 8;
+        draw_tilemap_rect(tw->x, tw->y, tw->width, tw->height,
+                          (BOTTOM_WIDTH - tw_px) / 2, my, 1);
+        my += tw->height * 8 + 4;
+    }
+
+    /* The command menu sits under it. */
     const WindowInfo *w = routed_menu_window();
-    if (!w)
+    if (!w || w->id == WINDOW_IN_BATTLE_TEXT)
         return;
 
     int menu_w = w->width * 8;
@@ -1146,6 +1219,7 @@ void platform_video_end_frame(void) {
             sig = (sig ^ (uint32_t)count) * 16777619u;
             sig = (sig ^ game_state.money_carried) * 16777619u;
             sig = (sig ^ (uint32_t)goods_character) * 16777619u;
+            sig = (sig ^ (uint32_t)goods_psi_tab) * 16777619u;
             for (int i = 0; i < count && i < HPPP_MAX_PARTY; i++) {
                 uint8_t member_id = game_state.party_members[i];
                 if (member_id == 0 || member_id > TOTAL_PARTY_COUNT)

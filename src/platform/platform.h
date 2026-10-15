@@ -69,6 +69,25 @@ void platform_render_frame(scanline_stamp_cb_t fps_overlay_cb);
  * viewport width, so a port that presents everything can ignore it. */
 extern int platform_visible_width;
 
+/* ---- Port-originated mode requests ----------------------------------------
+ *
+ * A port with its own UI (the 3DS bottom screen) needs to start the same
+ * things the player's buttons start, but it cannot push a mode itself: pushes
+ * must happen inside a mode step at a yield boundary. So it leaves a request
+ * here and the overworld root consumes it in its input phase, right where it
+ * handles the real buttons. The request is cleared as it is taken.
+ *
+ * Fields carry the inputs the target mode documents as "set by the parent".
+ * A port that has no UI of its own never writes these. */
+typedef enum {
+    HOST_MODE_REQ_NONE = 0,
+    HOST_MODE_REQ_USE_ITEM,   /* a = 1-based character, b = inventory slot */
+} HostModeRequest;
+
+extern HostModeRequest host_mode_request;
+extern uint16_t host_mode_req_a;
+extern uint16_t host_mode_req_b;
+
 /*
  * Input
  *

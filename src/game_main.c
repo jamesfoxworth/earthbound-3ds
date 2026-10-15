@@ -1397,6 +1397,23 @@ StepResult mode_step_overworld(ModeState *mst) {
             if (ow.input_disable_frame_counter > 0) {
                 ow.input_disable_frame_counter--;
             } else if (!ow.pending_interactions) {
+                /* A port's own UI can ask for the same things the buttons
+                 * start (see HostModeRequest in platform.h). Taken before the
+                 * pad so a queued request is not lost to a same-frame press.
+                 * GAME_MODE_USE_ITEM documents char_id/item_slot as parent
+                 * inputs and does its own usability and targeting work, so
+                 * this hands over exactly what the Goods menu would have. */
+                if (host_mode_request == HOST_MODE_REQ_USE_ITEM) {
+                    uint16_t req_char = host_mode_req_a;
+                    uint16_t req_slot = host_mode_req_b;
+                    host_mode_request = HOST_MODE_REQ_NONE;
+                    child = (ModeState){0};
+                    child.use_item.phase = UI_ENTER;
+                    child.use_item.char_id = req_char;
+                    child.use_item.item_slot = req_slot;
+                    st->phase = OWP_POST_TELEPORT;
+                    return STEP_RESULT_PUSH_INIT(GAME_MODE_USE_ITEM, &child);
+                }
                 if (core.pad1_pressed & PAD_A) {
                     child = (ModeState){0};
                     child.pause_menu.phase = PM_ENTER;

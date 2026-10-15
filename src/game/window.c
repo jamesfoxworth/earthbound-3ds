@@ -50,7 +50,14 @@ static const uint16_t window_configs[][4] = {
     [0x0B] = {  1 + WINDOW_X_NUDGE, 15, 11,  4 },  /* Status equipment panel */
     [0x0C] = { 12,  1, 19, 16 },  /* Store item list */
     [0x0D] = {  7,  1, 24, 16 },  /* Escargo Express item list */
-    [0x0E] = {  4,  1, 24,  6 },  /* In-battle text */
+    /* In-battle text. Widened and made taller from the original {4,1,24,6}:
+     * the 3DS port routes battle windows to the bottom screen and suppresses
+     * BG3 on the top screen for the duration of a battle, so this window's
+     * placement no longer competes with the battle menu for the main display,
+     * and a bigger static box fits more of a message per line. The width
+     * feeds check_text_word_wrap(), so wrapping gets looser rather than
+     * tighter -- it cannot clip text that used to fit. */
+    [0x0E] = {  1,  1, 30, 10 },  /* In-battle text */
     [0x0F] = {  1 + WINDOW_X_NUDGE,  1, 21,  6 },  /* Normal battle menu */
     [0x10] = {  4,  1,  8,  8 },  /* Battle PSI category */
     [0x11] = { 12,  1, 12,  4 },  /* Battle PSI name */
