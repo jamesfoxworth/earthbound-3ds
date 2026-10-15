@@ -387,30 +387,10 @@ static const WindowInfo *routed_menu_window(void) {
 /* Battle: the four HP/PP panels across the top, the focused menu window
  * beneath them -- the game has already drawn both into the window layer, so
  * these are its own panels, not a reconstruction. */
-/* Carry the battle background onto the bottom screen so the two panels read as
- * one scene rather than floating on black. The composed top frame already has
- * it, so sample the band below the enemies -- near the bottom of the viewport,
- * where the backdrop is least likely to have a combatant in it -- and repeat
- * it down the screen. */
-static void draw_battle_backdrop(void) {
-    const int src_y = EB_VIEWPORT_HEIGHT * 3 / 4;
-    const int src_x0 = (EB_VIEWPORT_WIDTH - BOTTOM_WIDTH) / 2;
-
-    for (int x = 0; x < BOTTOM_WIDTH; x++) {
-        int sx = src_x0 + x;
-        if (sx < 0) sx = 0;
-        if (sx >= EB_VIEWPORT_WIDTH) sx = EB_VIEWPORT_WIDTH - 1;
-        pixel_t c = frame[(size_t)src_y * EB_VIEWPORT_WIDTH + sx];
-        for (int y = 0; y < BOTTOM_HEIGHT; y++)
-            img_px(x, y, c);
-    }
-}
-
 static void draw_battle_bottom(void) {
     const pixel_t bg = PIXEL_RGB(0, 0, 0);
-    (void)bg;
 
-    draw_battle_backdrop();
+    fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, bg);
 
     int count = game_state.player_controlled_party_count;
     if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
@@ -525,6 +505,25 @@ void platform_video_end_frame(void) {
      * UI that belongs down here; elsewhere show the composed status panel.
      * Skipped while the debug console owns the screen. */
     suppress_restore();
+
+    /* The entry swirl lasts a few frames, which is not something a button
+     * press can catch, so capture it automatically while the console build is
+     * running. A handful of frames spaced through the animation is enough to
+     * see what the window mask is doing. */
+    if (platform_console_logging) {
+        static int swirl_shots;
+        static int swirl_gap;
+        if (ow.battle_swirl_countdown) {
+            if (swirl_shots < 4 && --swirl_gap <= 0) {
+                platform_debug_dump_ppu(frame);
+                swirl_shots++;
+                swirl_gap = 6;
+            }
+        } else if (swirl_shots) {
+            swirl_shots = 0;
+            swirl_gap = 0;
+        }
+    }
 
     if (!platform_console_logging) {
         static int last_context = -1;

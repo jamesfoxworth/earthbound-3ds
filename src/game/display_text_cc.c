@@ -2562,10 +2562,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         uint16_t item_id = arg ? (uint16_t)arg : (uint16_t)(get_argument_memory() & 0xFFFF);
         const ItemConfig *entry = get_item_entry(item_id);
         if (entry) {
-            /* Printed synchronously: routing the long fixed-width name
-             * fields through the typewriter destabilises the line layout
-             * (see queue_text_prefix). Short names still type out. */
-            print_text_with_word_splitting(entry->name, ITEM_NAME_LEN);
+            if (!queue_text_prefix(r, entry->name, ITEM_NAME_LEN))
+                print_text_with_word_splitting(entry->name, ITEM_NAME_LEN);
         }
         break;
     }
@@ -2579,7 +2577,8 @@ bool cc_1c_dispatch(ScriptReader *r, ModeState *out_init, GameMode *out_mode) {
         if (dest_id < PSI_TELEPORT_DEST_MAX_ENTRIES) {
             const uint8_t *entry = psi_teleport_dest_data +
                                    (uint32_t)dest_id * PSI_TELEPORT_DEST_ENTRY_SIZE;
-            print_string_with_wordwrap(entry, PSI_TELEPORT_DEST_NAME_LEN);
+            if (!queue_text_prefix(r, entry, PSI_TELEPORT_DEST_NAME_LEN))
+                print_string_with_wordwrap(entry, PSI_TELEPORT_DEST_NAME_LEN);
         }
         break;
     }
