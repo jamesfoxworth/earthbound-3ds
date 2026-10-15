@@ -478,6 +478,18 @@ bool load_game(int slot) {
     /* Port of load_game_slot.asm lines 92-93: game_state.timer → TIMER */
     core.play_timer = game_state.timer;
 
+    /* hp_pp_window_options holds the HP/PP window's tilemap palette-select
+     * bits, and 0 is not one of the values the game ever writes (0x0400 normal,
+     * 0x0C00 greyed, 0x1400 highlighted) — it means the field was never
+     * initialised. Files created before new-game init set it have 0 stored and
+     * would draw the window in BG palette 0, so normalise on load rather than
+     * stranding those saves. Only the four playable characters, matching every
+     * other writer of this field; the remaining slots have no HP/PP window. */
+    for (int i = 0; i < 4; i++) {
+        if (party_characters[i].hp_pp_window_options == 0)
+            party_characters[i].hp_pp_window_options = 0x0400;
+    }
+
     return true;
 }
 

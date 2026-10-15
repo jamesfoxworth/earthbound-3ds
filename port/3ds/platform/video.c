@@ -143,14 +143,26 @@ static void draw_focused_window_to_bottom(void) {
     if (!fb)
         return;
 
-    memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
-
     /* Whichever window has focus is the one the player is interacting with,
      * so this follows the overworld menu, the battle menus and their
      * sub-menus without naming any of them. */
     const WindowInfo *w = focused_window();
-    if (!w || w->width == 0 || w->height == 0)
+
+    /* Focus drops for a frame or two across menu transitions (one window
+     * closing before the next takes focus), and blanking on each of those
+     * showed as a black flicker. Hold the previous frame instead until focus
+     * has been gone long enough to mean it. Nothing is redrawn while held, so
+     * the double-buffered pair keeps showing the last good image. */
+    static int idle_frames;
+    if (!w || w->width == 0 || w->height == 0) {
+        if (++idle_frames < 10)
+            return;
+        memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
         return;
+    }
+    idle_frames = 0;
+
+    memset(fb, 0, (size_t)fbw * fbh * sizeof(pixel_t));
 
     const uint32_t map_base  = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
     const uint32_t tile_base = (uint32_t)(ppu.bg_nba[1] & 0x0F) * 0x2000;
