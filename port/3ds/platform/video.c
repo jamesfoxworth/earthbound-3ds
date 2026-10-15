@@ -5,6 +5,7 @@
 #include "snes/ppu.h"
 #include "include/binary.h"
 #include "game/game_state.h"
+#include "core/mode_stack.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -639,19 +640,34 @@ void platform_video_end_frame(void) {
     if (!platform_console_logging) {
         static int last_context = -1;
         static uint32_t last_sig;
+        static uint32_t last_res;
+        static int res_wait;
         static int present_left;
 
-        int context = ow.battle_mode ? 1 : 0;
+        /* Nothing to report until a save is actually running. GAME_MODE_
+         * OVERWORLD is pushed once at the boot->overworld handoff and stays
+         * the root for the rest of the session, so this is false on the
+         * title screen and through the file-select cascade -- where the
+         * party struct holds whatever the last-previewed slot left behind. */
+        bool in_game = (g_mode_stack.depth > 0 &&
+                        g_mode_stack.mode[0] == GAME_MODE_OVERWORLD);
+
+        int context = !in_game ? 2 : (ow.battle_mode ? 1 : 0);
         if (context != last_context) {
             /* Elements only clear their own rectangles, so the previous
              * context's pixels would otherwise survive underneath. */
             memset(bottom_img, 0, sizeof(bottom_img));
             last_context = context;
             last_sig = 0;
+            last_res = 0;
+            res_wait = 0;
             present_left = 2;
         }
 
-        if (context) {
+        if (context == 2) {
+            /* Pre-game: the context switch above already cleared the image;
+             * just push it to both buffers and leave the screen blank. */
+        } else if (context == 1) {
             /* The battle backdrop and panels animate, so rebuild every frame. */
             draw_battle_bottom();
             present_left = 1;
@@ -685,6 +701,43 @@ void platform_video_end_frame(void) {
                     sig = (sig ^ ch->name[c]) * 16777619u;
                 for (int a = 0; a < AFFLICTION_GROUP_COUNT; a++)
                     sig = (sig ^ ch->afflictions[a]) * 16777619u;
+            }
+
+            /* The panel is rasterised from live CGRAM and the game's window
+             * tiles, so those are inputs too -- not just the stats. Without
+             * them the panel composed once just after the save loaded (before
+             * load_window_gfx had composited the party-name tiles and the
+             * HP/PP sub-palette was installed) and then froze, because the
+             * stats never changed again. It only came right after a battle,
+             * whose HP change forced a recompose.
+             *
+             * These are hashed separately from the stats and act on a timer:
+             * CGRAM is rewritten every frame during a palette fade, and
+             * recomposing on each of those would cost what composing every
+             * frame used to. A stat change still redraws immediately; a
+             * resource change redraws at most every RES_REDRAW_GAP frames,
+             * which converges within a few frames of the fade settling.
+             *
+             * CGRAM 0-19 covers the five 2bpp sub-palettes the panel's
+             * tilemap entries select; the 32 tiles from 0x2A0 are the
+             * party-name tile pair rows. */
+            #define RES_REDRAW_GAP 8
+            uint32_t res = 2166136261u;
+            for (int c = 0; c < 20; c++)
+                res = (res ^ ppu.cgram[c]) * 16777619u;
+            {
+                uint32_t nt = (uint32_t)(ppu.bg_nba[1] & 0x0F) * 0x2000
+                              + 0x2A0u * 16u;
+                if (nt + 512u <= VRAM_SIZE)
+                    for (uint32_t b = 0; b < 512u; b += 4)
+                        res = (res ^ read_u16_le(&ppu.vram[nt + b])) * 16777619u;
+            }
+            if (res != last_res && ++res_wait >= RES_REDRAW_GAP) {
+                last_res = res;
+                res_wait = 0;
+                last_sig = 0;   /* force the redraw below */
+            } else if (res == last_res) {
+                res_wait = 0;
             }
             if (sig != last_sig) {
                 last_sig = sig;
