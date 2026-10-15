@@ -138,10 +138,38 @@ bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
     if (n == 0)
         return false;
 
+    /* Decide the line break up front, the way print_string_with_wordwrap()
+     * did. Feeding the name through the typewriter otherwise defers the
+     * decision to its first character, so the line re-flows after some of the
+     * surrounding text has already been laid out -- which reads as the text
+     * jumping around mid-sentence. */
+    WindowInfo *w = get_focus_window_info();
+    if (w && win.current_focus_window != WINDOW_ID_NONE && dt.enable_word_wrap) {
+        uint16_t width = 0;
+        for (int i = 0; i < n; i++) {
+            uint8_t ch = data[i];
+            if (ch == 0x2F)
+                width += 8;
+            else
+                width += font_get_width(w->font, (uint8_t)((ch - 0x50) & 0x7F))
+                         + character_padding;
+        }
+        uint16_t pos = (w->text_x > 0)
+            ? (uint16_t)((w->text_x - 1) * 8 + (vwf_x & 7))
+            : (uint16_t)(vwf_x & 7);
+        if (pos + width > (uint16_t)((w->width - 2) * 8)) {
+            print_newline();
+            vwf_indent_new_line = 1;
+        }
+    }
+
     memcpy(text_prefix_buf, data, (size_t)n);
     text_prefix_buf[n] = 0x00;  /* script_read_byte() ends the prefix here */
     text_prefix_base = text_prefix_buf;
     r->prefix_off = 0;
+    /* Already measured as one word, so the main loop must not re-check and
+     * break the name part-way through. */
+    dt.upcoming_word_length = (uint16_t)n;
     return true;
 }
 

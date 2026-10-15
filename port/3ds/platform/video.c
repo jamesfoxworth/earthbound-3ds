@@ -387,8 +387,30 @@ static const WindowInfo *routed_menu_window(void) {
 /* Battle: the four HP/PP panels across the top, the focused menu window
  * beneath them -- the game has already drawn both into the window layer, so
  * these are its own panels, not a reconstruction. */
+/* Carry the battle background onto the bottom screen so the two panels read as
+ * one scene rather than floating on black. The composed top frame already has
+ * it, so sample the band below the enemies -- near the bottom of the viewport,
+ * where the backdrop is least likely to have a combatant in it -- and repeat
+ * it down the screen. */
+static void draw_battle_backdrop(void) {
+    const int src_y = EB_VIEWPORT_HEIGHT - 4;
+    const int src_x0 = (EB_VIEWPORT_WIDTH - BOTTOM_WIDTH) / 2;
+
+    for (int x = 0; x < BOTTOM_WIDTH; x++) {
+        int sx = src_x0 + x;
+        if (sx < 0) sx = 0;
+        if (sx >= EB_VIEWPORT_WIDTH) sx = EB_VIEWPORT_WIDTH - 1;
+        pixel_t c = frame[(size_t)src_y * EB_VIEWPORT_WIDTH + sx];
+        for (int y = 0; y < BOTTOM_HEIGHT; y++)
+            img_px(x, y, c);
+    }
+}
+
 static void draw_battle_bottom(void) {
     const pixel_t bg = PIXEL_RGB(0, 0, 0);
+    (void)bg;
+
+    draw_battle_backdrop();
 
     int count = game_state.player_controlled_party_count;
     if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
@@ -407,17 +429,14 @@ static void draw_battle_bottom(void) {
         if (tilemap_rect_blank(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT))
             continue;   /* mid-redraw: keep what is already shown */
         int dx = ox + i * panel_px_w;
-        fill_rect(dx, 6, panel_px_w, panel_px_h, bg);
         draw_tilemap_rect(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
                           dx, 6, 1);
     }
 
     int my = 6 + panel_px_h + 10;
     const WindowInfo *w = routed_menu_window();
-    if (!w) {
-        fill_rect(0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
+    if (!w)
         return;
-    }
 
     int menu_w = w->width * 8;
     int menu_h = w->height * 8;
@@ -426,7 +445,6 @@ static void draw_battle_bottom(void) {
     if (tilemap_rect_blank(w->x, w->y, w->width, w->height))
         return;
 
-    fill_rect(0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
     draw_tilemap_rect(w->x, w->y, w->width, w->height,
                       (BOTTOM_WIDTH - menu_w) / 2, my, 1);
 }
