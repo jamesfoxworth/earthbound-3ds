@@ -254,11 +254,16 @@ static void fps_overlay_stamp_scanline(int y, pixel_t *pixels) {
     if (text_row >= fps_overlay.n_lines || glyph_y >= h) return;
 
     int overlay_w = 46;
-    int ox = EB_VIEWPORT_WIDTH - overlay_w - 1;
+    /* Anchor to the visible right edge, not the buffer's: a port that crops
+     * the presented image (the 3DS pillarbox) would otherwise blank the
+     * gutter this sits in and the readout would vanish. */
+    int vis = platform_visible_width;
+    if (vis <= 0 || vis > EB_VIEWPORT_WIDTH) vis = EB_VIEWPORT_WIDTH;
+    int ox = vis - overlay_w - 1;
     pixel_t color = fps_overlay.colors[text_row];
 
     /* Black background */
-    for (int x = ox - 1; x < EB_VIEWPORT_WIDTH; x++)
+    for (int x = ox - 1; x < vis; x++)
         if (x >= 0) pixels[x] = PIXEL_RGB(0, 0, 0);
 
     /* Stamp glyphs */

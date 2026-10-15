@@ -18,6 +18,8 @@ static void send_scanline_with_stamp(int y, const pixel_t *pixels) {
     platform_video_send_scanline(y, pixels);
 }
 
+int platform_visible_width = EB_VIEWPORT_WIDTH;
+
 void platform_render_frame(scanline_stamp_cb_t fps_overlay_cb) {
     platform_video_begin_frame();
 

@@ -8,6 +8,7 @@
 #include "core/mode_stack.h"
 #include "touch.h"
 #include "include/pad.h"
+#include "game/inventory.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -175,6 +176,10 @@ void platform_video_send_scanline(int y, const pixel_t *pixels) {
      * Content stays exactly where it is -- this crops rather than rescaling,
      * which is what makes it free. */
     int vw = video_opt_view_width;
+    /* Tell the game where the visible area ends so right-anchored overlays
+     * (the FPS readout) land inside it rather than in the blanked gutter. */
+    platform_visible_width = (vw > 0 && vw <= EB_VIEWPORT_WIDTH)
+                             ? vw : EB_VIEWPORT_WIDTH;
     if (vw > 0 && vw < EB_VIEWPORT_WIDTH) {
         const int pad = (EB_VIEWPORT_WIDTH - vw) / 2;
         memset(row, 0, (size_t)pad * sizeof(pixel_t));
@@ -288,7 +293,7 @@ static void fill_rect(int x, int y, int w, int h, pixel_t c) {
  * drawn can be redrawn here from the game's own tiles. Base addresses and the
  * index-0-is-transparent rule follow ppu_render.c. Brightness is deliberately
  * not applied so the panel stays readable while the world fades. */
-static void draw_tilemap_rect_src(const uint8_t *shadow,
+static void draw_tilemap_rect_src(const uint8_t *shadow, int shadow_w,
                                   int tile_x, int tile_y,
                                   int tiles_w, int tiles_h,
                                   int dest_x, int dest_y, int scale) {
@@ -302,8 +307,8 @@ static void draw_tilemap_rect_src(const uint8_t *shadow,
                 /* win.bg2_buffer is the game's RAM shadow of this same 32x32
                  * tilemap, 2 bytes per entry. Tile graphics still come from
                  * VRAM -- only the entries differ. */
-                size_t so = ((size_t)(((tile_y + ty) & 31) * 32
-                                      + ((tile_x + tx) & 31))) * 2;
+                size_t so = ((size_t)((tile_y + ty) * shadow_w
+                                      + (tile_x + tx))) * 2;
                 entry = read_u16_le(&shadow[so]);
             } else {
             uint32_t entry_addr = map_base +
@@ -347,7 +352,7 @@ static void draw_tilemap_rect_src(const uint8_t *shadow,
 static void draw_tilemap_rect(int tile_x, int tile_y,
                               int tiles_w, int tiles_h,
                               int dest_x, int dest_y, int scale) {
-    draw_tilemap_rect_src(NULL, tile_x, tile_y, tiles_w, tiles_h,
+    draw_tilemap_rect_src(NULL, 32, tile_x, tile_y, tiles_w, tiles_h,
                           dest_x, dest_y, scale);
 }
 
@@ -450,12 +455,20 @@ static int draw_eb(int x, int y, const uint8_t *eb, int max,
 #define WFRAME_BR     0xFC10
 #define WFRAME_FILL   (0x2000 | 0x40)
 
-static uint8_t frame_scratch[2048];
+/* The bottom screen is 40 tiles across, so this scratch map is 40 wide --
+ * the game's own 32-wide tilemap cannot describe a full-width box, and
+ * sampling it with a 32 wrap is what drew a second left border partway
+ * across the options panel. */
+#define FS_W 40
+#define FS_H 30
+static uint8_t frame_scratch[FS_W * FS_H * 2];
 
 static void draw_window_box(int tiles_w, int tiles_h, int dest_x, int dest_y) {
+    if (tiles_w > FS_W) tiles_w = FS_W;
+    if (tiles_h > FS_H) tiles_h = FS_H;
     memset(frame_scratch, 0, sizeof(frame_scratch));
-    for (int ty = 0; ty < tiles_h && ty < 32; ty++) {
-        for (int tx = 0; tx < tiles_w && tx < 32; tx++) {
+    for (int ty = 0; ty < tiles_h; ty++) {
+        for (int tx = 0; tx < tiles_w; tx++) {
             bool t = (ty == 0), b = (ty == tiles_h - 1);
             bool l = (tx == 0), r = (tx == tiles_w - 1);
             uint16_t e = t && l ? WFRAME_TL : t && r ? WFRAME_TR
@@ -464,12 +477,12 @@ static void draw_window_box(int tiles_w, int tiles_h, int dest_x, int dest_y) {
                        : b      ? WFRAME_BOTTOM
                        : l      ? WFRAME_LEFT
                        : r      ? WFRAME_RIGHT : WFRAME_FILL;
-            size_t o = ((size_t)ty * 32 + tx) * 2;
+            size_t o = ((size_t)ty * FS_W + tx) * 2;
             frame_scratch[o]     = (uint8_t)(e & 0xFF);
             frame_scratch[o + 1] = (uint8_t)(e >> 8);
         }
     }
-    draw_tilemap_rect_src(frame_scratch, 0, 0, tiles_w, tiles_h,
+    draw_tilemap_rect_src(frame_scratch, FS_W, 0, 0, tiles_w, tiles_h,
                           dest_x, dest_y, 1);
 }
 
@@ -680,59 +693,94 @@ static bool options_handle_touch(const TouchState *t) {
 #define HPPP_CARDS_Y      6
 #define HPPP_STATUSROW_Y  (BOTTOM_HEIGHT - MONEY_BOX_H - 6)
 
-/* ---- Command hub ---------------------------------------------------------
+/* ---- Goods panel --------------------------------------------------------
  *
- * Each entry injects the pad press the game already binds, so the real mode
- * is pushed by the game's own input handler at its own yield boundary -- the
- * port never reaches into the mode stack. Per-character drilling (tap a card
- * for that character's Goods/PSI) needs the pause menu to accept a
- * preselected character, which these entry points do not take yet. */
-typedef struct {
-    const char *label;
-    uint16_t    pad;
-    int         x, y, w, h;
-} HubButton;
+ * A persistent list of the selected character's Goods, in one wide window
+ * under the cards -- the bottom screen showing something the game otherwise
+ * keeps behind two menu levels, rather than buttons that only replay a
+ * keypress. Tap a card to switch character; Ness (party slot 0) is the
+ * default since he is always in the party.
+ *
+ * The list is composed here from game data (party_characters[].items and
+ * get_item_entry()) using the game's font and window frame, because unlike
+ * the HP/PP cards there is no resident window to copy -- the real Goods
+ * window only exists while its menu is open. */
+#define GOODS_TILES_W   38
+#define GOODS_TILES_H   15
+#define GOODS_BOX_W     (GOODS_TILES_W * 8)
+#define GOODS_X         ((BOTTOM_WIDTH - GOODS_BOX_W) / 2)
+#define GOODS_Y         (HPPP_CARDS_Y + HPPP_WINDOW_HEIGHT * 8 + 6)
+#define GOODS_COLS      2
+#define GOODS_ITEM_MAX  14      /* CharStruct.items[14] */
 
-#define HUB_COUNT   3
-#define HUB_TILES_W 11
-#define HUB_BOX_W   (HUB_TILES_W * 8)
-#define HUB_BOX_H   (4 * 8)
-#define HUB_Y       (HPPP_CARDS_Y + HPPP_WINDOW_HEIGHT * 8 + 10)
+static int goods_character;   /* party slot, not member id */
 
-static HubButton hub[HUB_COUNT] = {
-    { "Menu", PAD_A, 0, 0, 0, 0 },
-    { "Map",  PAD_X, 0, 0, 0, 0 },
-    { "Talk", PAD_L, 0, 0, 0, 0 },
-};
+/* Card hit rects, filled in as the cards are drawn. */
+static struct { int x, y, w, h; } card_hit[HPPP_MAX_PARTY];
+static int card_hit_count;
 
-static void draw_hub(void) {
+static void draw_goods_panel(void) {
     int prev = font_id_cur;
     font_id_cur = FONT_ID_NORMAL;
     if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
 
-    const int gap = (BOTTOM_WIDTH - HUB_COUNT * HUB_BOX_W) / (HUB_COUNT + 1);
+    draw_window_box(GOODS_TILES_W, GOODS_TILES_H, GOODS_X, GOODS_Y);
+
+    int count = game_state.player_controlled_party_count;
+    if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
+    if (goods_character >= count) goods_character = 0;
+
+    uint8_t member_id = game_state.party_members[goods_character];
+    if (member_id == 0 || member_id > TOTAL_PARTY_COUNT) {
+        font_id_cur = prev;
+        return;
+    }
+    const CharStruct *ch = &party_characters[member_id - 1];
+
     font_cell_bg = true;
     font_cell_bg_c = game_text_back();
-    for (int i = 0; i < HUB_COUNT; i++) {
-        int x = gap + i * (HUB_BOX_W + gap);
-        hub[i].x = x; hub[i].y = HUB_Y;
-        hub[i].w = HUB_BOX_W; hub[i].h = HUB_BOX_H;
-        draw_window_box(HUB_TILES_W, 4, x, HUB_Y);
-        int tw = measure_ascii(hub[i].label);
-        draw_ascii(x + (HUB_BOX_W - tw) / 2,
-                   HUB_Y + 8 + (16 - font_get_height(font_id_cur)) / 2,
-                   hub[i].label, 1, game_text_ink());
+    const pixel_t ink = game_text_ink();
+
+    /* Derive the row count from the real font height rather than assuming
+     * one -- a fixed 7 rows overflowed the window's bottom border. Whatever
+     * fits, fits; if the font is tall enough that all 14 do not, the list is
+     * simply shorter rather than drawn outside the frame. */
+    const int line_h = font_get_height(font_id_cur) + 1;
+    const int interior_h = (GOODS_TILES_H - 2) * 8;
+    int rows = (interior_h - line_h) / line_h;
+    if (rows < 1) rows = 1;
+    if (rows > (GOODS_ITEM_MAX + GOODS_COLS - 1) / GOODS_COLS)
+        rows = (GOODS_ITEM_MAX + GOODS_COLS - 1) / GOODS_COLS;
+
+    int hx = GOODS_X + 8, hy = GOODS_Y + 8;
+    hx += draw_eb(hx, hy, ch->name, 5, 1, ink);
+    draw_ascii(hx + 6, hy, "- Goods", 1, ink);
+
+    const int col_w = (GOODS_BOX_W - 16) / GOODS_COLS;
+    for (int i = 0; i < GOODS_COLS * rows && i < GOODS_ITEM_MAX; i++) {
+        uint8_t id = ch->items[i];
+        if (id == 0)
+            continue;
+        const ItemConfig *it = get_item_entry(id);
+        if (!it)
+            continue;
+        int cx = GOODS_X + 8 + (i / rows) * col_w;
+        int cy = hy + line_h + (i % rows) * line_h;
+        draw_eb(cx, cy, it->name, ITEM_NAME_LEN, 1, ink);
     }
+
     font_cell_bg = false;
     font_id_cur = prev;
 }
 
-static bool hub_handle_touch(const TouchState *t) {
+/* Tapping a card selects whose Goods are listed. */
+static bool goods_handle_touch(const TouchState *t) {
     if (!t->pressed)
         return false;
-    for (int i = 0; i < HUB_COUNT; i++) {
-        if (hub[i].w && touch_in(t, hub[i].x, hub[i].y, hub[i].w, hub[i].h)) {
-            input_pulse_pad(hub[i].pad);
+    for (int i = 0; i < card_hit_count; i++) {
+        if (touch_in(t, card_hit[i].x, card_hit[i].y,
+                     card_hit[i].w, card_hit[i].h)) {
+            goods_character = i;
             return true;
         }
     }
@@ -836,6 +884,13 @@ static int draw_overworld_hppp(int dest_y) {
             draw_tilemap_rect(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
                               ox0 + i * panel_px_w0, dest_y, 1);
         }
+        card_hit_count = count;
+        for (int i = 0; i < count; i++) {
+            card_hit[i].x = ox0 + i * panel_px_w0;
+            card_hit[i].y = dest_y;
+            card_hit[i].w = panel_px_w0;
+            card_hit[i].h = HPPP_WINDOW_HEIGHT * 8;
+        }
         return dest_y + HPPP_WINDOW_HEIGHT * 8;
     }
 
@@ -865,12 +920,17 @@ static int draw_overworld_hppp(int dest_y) {
     for (int i = 0; i < count; i++) {
         int tx = HPPP_CENTER_TILE - (count * HPPP_WINDOW_WIDTH) / 2
                  + i * HPPP_WINDOW_WIDTH;
-        draw_tilemap_rect_src(win.bg2_buffer, tx, ty,
+        draw_tilemap_rect_src(win.bg2_buffer, 32, tx, ty,
                               HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
                               ox + i * panel_px_w, dest_y, 1);
+        card_hit[i].x = ox + i * panel_px_w;
+        card_hit[i].y = dest_y;
+        card_hit[i].w = panel_px_w;
+        card_hit[i].h = HPPP_WINDOW_HEIGHT * 8;
         drawn++;
     }
 
+    card_hit_count = drawn;
     memcpy(&win.bg2_buffer[off], saved, sizeof(saved));
     ow.render_hppp_windows = save_render;
     ow.currently_drawn_hppp_windows = save_drawn;
@@ -896,7 +956,7 @@ static void draw_bottom_panel(void) {
     /* The game's own HP/PP panels, identical to the battle ones, centred. */
     bool have_cards = draw_overworld_hppp(HPPP_CARDS_Y) > 0;
     if (have_cards)
-        draw_hub();
+        draw_goods_panel();
     if (options_open)
         draw_options_panel();
     if (have_cards)
@@ -1035,7 +1095,7 @@ void platform_video_end_frame(void) {
                                 settings_hit_w, settings_hit_h)) {
                 options_open = true;
                 touch_dirty = true;
-            } else if (hub_handle_touch(t)) {
+            } else if (goods_handle_touch(t)) {
                 touch_dirty = true;
             }
         } else if (options_open) {
@@ -1074,6 +1134,7 @@ void platform_video_end_frame(void) {
             int count = game_state.player_controlled_party_count;
             sig = (sig ^ (uint32_t)count) * 16777619u;
             sig = (sig ^ game_state.money_carried) * 16777619u;
+            sig = (sig ^ (uint32_t)goods_character) * 16777619u;
             for (int i = 0; i < count && i < HPPP_MAX_PARTY; i++) {
                 uint8_t member_id = game_state.party_members[i];
                 if (member_id == 0 || member_id > TOTAL_PARTY_COUNT)
@@ -1090,6 +1151,8 @@ void platform_video_end_frame(void) {
                     sig = (sig ^ ch->name[c]) * 16777619u;
                 for (int a = 0; a < AFFLICTION_GROUP_COUNT; a++)
                     sig = (sig ^ ch->afflictions[a]) * 16777619u;
+                for (int k = 0; k < 14; k++)
+                    sig = (sig ^ ch->items[k]) * 16777619u;
             }
 
             /* The panel is rasterised from live CGRAM and the game's window

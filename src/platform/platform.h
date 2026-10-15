@@ -63,6 +63,12 @@ void platform_video_end_frame(void);
 void platform_video_set_vsync(bool enabled);
 void platform_render_frame(scanline_stamp_cb_t fps_overlay_cb);
 
+/* Rightmost visible column + 1 of the presented image. A port that crops or
+ * pillarboxes what it shows sets this so right-anchored overlays land inside
+ * the visible area instead of in a blanked gutter. Defaults to the full
+ * viewport width, so a port that presents everything can ignore it. */
+extern int platform_visible_width;
+
 /*
  * Input
  *
