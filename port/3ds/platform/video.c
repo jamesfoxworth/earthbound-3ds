@@ -369,6 +369,12 @@ static void draw_tilemap_rect(int tile_x, int tile_y,
 
 /* Draw one glyph run. Glyph rows are bitmasks where a CLEAR bit is ink (the
  * convention font_get_glyph uses). Returns the advance in pixels. */
+/* The game composites the party-name tiles in the HP/PP cards with
+ * FONT_ID_BATTLE (text.c load_window_gfx), and those cards sit directly above
+ * these panels, so the panels use the same face. FONT_ID_NORMAL is the
+ * dialogue font and looked subtly wrong next to them. */
+#define EB_PANEL_FONT FONT_ID_BATTLE
+
 static int font_id_cur = FONT_ID_TINY;
 
 /* The game's text tiles are opaque: convert_1bpp_to_2bpp() (text.c) maps
@@ -406,7 +412,11 @@ static int draw_glyphs(int x, int y, const uint8_t *idx,
                 }
             }
         }
-        cx += w * scale;
+        /* The game advances by width + character_padding (text.c: every
+         * measure and every VWF blit adds it). Advancing by width alone
+         * crammed the glyphs a pixel tighter per character, which is part of
+         * why this read as a different face than the game's own text. */
+        cx += (w + character_padding) * scale;
     }
     return cx - x;
 }
@@ -490,7 +500,8 @@ static int measure_ascii(const char *str) {
     int px = 0;
     for (const char *c = str; *c; c++)
         px += font_get_width(font_id_cur,
-                             (uint8_t)(ascii_to_eb_char(*c) - 0x50));
+                             (uint8_t)(ascii_to_eb_char(*c) - 0x50))
+              + character_padding;
     return px;
 }
 
@@ -509,7 +520,7 @@ static int draw_money_box(int right_x, int dest_y) {
     snprintf(buf, sizeof(buf), "$%lu", (unsigned long)game_state.money_carried);
 
     int prev = font_id_cur;
-    font_id_cur = FONT_ID_NORMAL;
+    font_id_cur = EB_PANEL_FONT;
     if (!font_get_glyph(font_id_cur, 0)) {   /* main font not resident yet */
         font_id_cur = prev;
         return 0;
@@ -621,7 +632,7 @@ static const OptionRow option_rows[] = {
 
 static void draw_options_panel(void) {
     int prev = font_id_cur;
-    font_id_cur = FONT_ID_NORMAL;
+    font_id_cur = EB_PANEL_FONT;
     if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
 
     draw_window_box(OPT_TILES_W, OPT_TILES_H, OPT_X, OPT_Y);
@@ -721,7 +732,7 @@ static int card_hit_count;
 
 static void draw_goods_panel(void) {
     int prev = font_id_cur;
-    font_id_cur = FONT_ID_NORMAL;
+    font_id_cur = EB_PANEL_FONT;
     if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
 
     draw_window_box(GOODS_TILES_W, GOODS_TILES_H, GOODS_X, GOODS_Y);
