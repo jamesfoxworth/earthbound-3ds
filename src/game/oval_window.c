@@ -483,6 +483,10 @@ static void apply_hdma_to_ppu(void) {
         ppu.wh1_table[i] = packed & 0xFF;         /* right */
     }
     ppu.window_hdma_active = true;
+    /* Swirl and oval transitions are whole-screen effects: stretch their spans
+     * across the full viewport instead of confining them to the centered 256px
+     * band. See the window_wide_scale note in ppu.h. */
+    ppu.window_wide_scale = true;
 }
 
 /* ---- SET_WINDOW_MASK (port of asm/system/set_window_mask.asm) ---- */
@@ -520,6 +524,7 @@ void set_window_mask(uint16_t config, uint16_t invert) {
 
 /* ---- DISABLE_WINDOWS (port of C0B0AA) ---- */
 void disable_windows(void) {
+    ppu.window_wide_scale = false;
     ppu.wh0 = 0xFF;
     ppu.wh1 = 0x00;
     ppu.wh2 = 0xFF;

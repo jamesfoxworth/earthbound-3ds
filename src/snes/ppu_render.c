@@ -1154,6 +1154,13 @@ void PPU_HOT_FUNC(precompute_window_masks)(
         int inv_lo = wide_mode ? wx_offset : 0;
         int inv_hi = wide_mode ? (render_width - 1 + wx_offset) : 255;
 
+        /* Whole-screen window effects stretch across the viewport instead of
+         * sitting in a centered 256px band (see window_wide_scale in ppu.h).
+         * The oval door/battle transitions mask layers via TMW/TSW, so the
+         * same mapping is needed here as in the color-math section below. */
+        const bool wscale = wide_mode && ppu.window_wide_scale;
+        #define WX_SCALE_SPAN(v)             ((int)(((int)(v) * (render_width - 1)) / 255) + wx_offset)
+
         /* Use pre-classified layer batches (computed once per frame) */
         uint8_t tm_w1_noninv = wc->tm_w1_noninv, ts_w1_noninv = wc->ts_w1_noninv;
         uint8_t tm_w1_inv = wc->tm_w1_inv, ts_w1_inv = wc->ts_w1_inv;
@@ -1182,32 +1189,41 @@ void PPU_HOT_FUNC(precompute_window_masks)(
             /* Extend a non-inverted window into the wide-mode gutters when it
              * touches a native edge, so the mask is continuous past 0/255
              * (mirrors the inverted branch's inv_lo/inv_hi extension). */
-            int _l = (wide_mode && w1_left  <= 0)   ? inv_lo : (int)w1_left;
-            int _r = (wide_mode && w1_right >= 255) ? inv_hi : (int)w1_right;
+            int _l = (wide_mode && w1_left  <= 0)   ? inv_lo
+                   : (wscale ? WX_SCALE_SPAN(w1_left)  : (int)w1_left);
+            int _r = (wide_mode && w1_right >= 255) ? inv_hi
+                   : (wscale ? WX_SCALE_SPAN(w1_right) : (int)w1_right);
             BATCH_SPAN(_l, _r, tm_w1_noninv, ts_w1_noninv);
         }
 
         if (tm_w1_inv | ts_w1_inv) {
-            if (w1_left - 1 >= inv_lo)
-                BATCH_SPAN(inv_lo, w1_left - 1, tm_w1_inv, ts_w1_inv);
-            if (w1_right + 1 <= inv_hi)
-                BATCH_SPAN(w1_right + 1, inv_hi, tm_w1_inv, ts_w1_inv);
+            int _il = wscale ? WX_SCALE_SPAN(w1_left)  : (int)w1_left;
+            int _ir = wscale ? WX_SCALE_SPAN(w1_right) : (int)w1_right;
+            if (_il - 1 >= inv_lo)
+                BATCH_SPAN(inv_lo, _il - 1, tm_w1_inv, ts_w1_inv);
+            if (_ir + 1 <= inv_hi)
+                BATCH_SPAN(_ir + 1, inv_hi, tm_w1_inv, ts_w1_inv);
         }
 
         if (tm_w2_noninv | ts_w2_noninv) {
             /* Same gutter extension for the window-2 non-inverted group. */
-            int _l = (wide_mode && w2_left  <= 0)   ? inv_lo : (int)w2_left;
-            int _r = (wide_mode && w2_right >= 255) ? inv_hi : (int)w2_right;
+            int _l = (wide_mode && w2_left  <= 0)   ? inv_lo
+                   : (wscale ? WX_SCALE_SPAN(w2_left)  : (int)w2_left);
+            int _r = (wide_mode && w2_right >= 255) ? inv_hi
+                   : (wscale ? WX_SCALE_SPAN(w2_right) : (int)w2_right);
             BATCH_SPAN(_l, _r, tm_w2_noninv, ts_w2_noninv);
         }
 
         if (tm_w2_inv | ts_w2_inv) {
-            if (w2_left - 1 >= inv_lo)
-                BATCH_SPAN(inv_lo, w2_left - 1, tm_w2_inv, ts_w2_inv);
-            if (w2_right + 1 <= inv_hi)
-                BATCH_SPAN(w2_right + 1, inv_hi, tm_w2_inv, ts_w2_inv);
+            int _il = wscale ? WX_SCALE_SPAN(w2_left)  : (int)w2_left;
+            int _ir = wscale ? WX_SCALE_SPAN(w2_right) : (int)w2_right;
+            if (_il - 1 >= inv_lo)
+                BATCH_SPAN(inv_lo, _il - 1, tm_w2_inv, ts_w2_inv);
+            if (_ir + 1 <= inv_hi)
+                BATCH_SPAN(_ir + 1, inv_hi, tm_w2_inv, ts_w2_inv);
         }
         #undef BATCH_SPAN
+        #undef WX_SCALE_SPAN
 
         /* Dual-window layers: per-pixel fallback (rare) */
         for (int di = 0; di < dual_count; di++) {
@@ -1223,7 +1239,8 @@ void PPU_HOT_FUNC(precompute_window_masks)(
                  * gutter, for both inverted (e.g. oval window blanking) and
                  * non-inverted windows. Matches the color-math dual path and
                  * the single-window inv_lo/inv_hi extensions above. */
-                int cwx = wx < 0 ? 0 : (wx > 255 ? 255 : wx);
+                int cwx = wscale ? (x * 255) / (render_width - 1)
+                                 : (wx < 0 ? 0 : (wx > 255 ? 255 : wx));
                 bool in_w1 = ((uint8_t)cwx >= w1_left && (uint8_t)cwx <= w1_right);
                 bool in_w2 = ((uint8_t)cwx >= w2_left && (uint8_t)cwx <= w2_right);
                 if (d_w1_inv) in_w1 = !in_w1;
@@ -1276,6 +1293,14 @@ void PPU_HOT_FUNC(precompute_window_masks)(
         int inv_lo = wide_mode ? wx_offset : 0;
         int inv_hi = wide_mode ? (render_width - 1 + wx_offset) : 255;
 
+        /* Whole-screen window effects (battle swirl, oval transitions) stretch
+         * their native 0-255 spans across the full viewport rather than sitting
+         * in a centered 256px band. Scaling the span endpoints outward is the
+         * exact inverse of the per-pixel native mapping used in the dual-window
+         * branch below, so both branches agree on the boundary. */
+        const bool wscale = wide_mode && ppu.window_wide_scale;
+        #define WX_SCALE_SPAN(v)             ((int)(((int)(v) * (render_width - 1)) / 255) + wx_offset)
+
         if (!cm_w1_en && !cm_w2_en) {
             memset(cm_prevented_line, (prevent_mode == 1) ? 1 : 0, render_width);
         } else {
@@ -1296,8 +1321,10 @@ void PPU_HOT_FUNC(precompute_window_masks)(
                     /* Extend the inside-span into the gutters when the window
                      * touches a native edge, so wide-mode padding columns get
                      * the same color-math treatment (mirrors the inverted branch). */
-                    int _l = (wide_mode && w1_left  <= 0)   ? inv_lo : (int)w1_left;
-                    int _r = (wide_mode && w1_right >= 255) ? inv_hi : (int)w1_right;
+                    int _l = (wide_mode && w1_left  <= 0)   ? inv_lo
+                           : (wscale ? WX_SCALE_SPAN(w1_left)  : (int)w1_left);
+                    int _r = (wide_mode && w1_right >= 255) ? inv_hi
+                           : (wscale ? WX_SCALE_SPAN(w1_right) : (int)w1_right);
                     CM_SPAN(_l, _r, val_inside);
                 } else {
                     if (w1_left - 1 >= inv_lo) CM_SPAN(inv_lo, w1_left - 1, val_inside);
@@ -1307,8 +1334,10 @@ void PPU_HOT_FUNC(precompute_window_masks)(
                 memset(cm_prevented_line, val_outside, render_width);
                 if (!cm_w2_inv) {
                     /* Same gutter extension for the window-2 single-window case. */
-                    int _l = (wide_mode && w2_left  <= 0)   ? inv_lo : (int)w2_left;
-                    int _r = (wide_mode && w2_right >= 255) ? inv_hi : (int)w2_right;
+                    int _l = (wide_mode && w2_left  <= 0)   ? inv_lo
+                           : (wscale ? WX_SCALE_SPAN(w2_left)  : (int)w2_left);
+                    int _r = (wide_mode && w2_right >= 255) ? inv_hi
+                           : (wscale ? WX_SCALE_SPAN(w2_right) : (int)w2_right);
                     CM_SPAN(_l, _r, val_inside);
                 } else {
                     if (w2_left - 1 >= inv_lo) CM_SPAN(inv_lo, w2_left - 1, val_inside);
@@ -1324,7 +1353,8 @@ void PPU_HOT_FUNC(precompute_window_masks)(
                      * edge so the window's state at the edge extends continuously
                      * into the gutter — equivalent to the inv_lo/inv_hi gutter
                      * extension in the single-window branches above. */
-                    int cwx = wx < 0 ? 0 : (wx > 255 ? 255 : wx);
+                    int cwx = wscale ? (x * 255) / (render_width - 1)
+                                     : (wx < 0 ? 0 : (wx > 255 ? 255 : wx));
                     bool in_w1 = ((uint8_t)cwx >= w1_left && (uint8_t)cwx <= w1_right);
                     bool in_w2 = ((uint8_t)cwx >= w2_left && (uint8_t)cwx <= w2_right);
                     if (cm_w1_inv) in_w1 = !in_w1;
@@ -1341,6 +1371,7 @@ void PPU_HOT_FUNC(precompute_window_masks)(
                 }
             }
             #undef CM_SPAN
+            #undef WX_SCALE_SPAN
         }
     } else {
         memset(cm_prevented_line, 0, render_width);

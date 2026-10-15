@@ -95,6 +95,16 @@ typedef struct {
     bool window2_hdma_active;       /* use wh2/wh3_table instead of static wh2/wh3 */
     bool tm_hdma_active;            /* use tm/ts_per_scanline (letterbox effect) */
 
+    /* Window coordinates are authored in native 256px space. Full-screen window
+     * effects (the battle swirl and the oval window) are meant to cover the whole
+     * display, so on a wider viewport their spans must be SCALED across it rather
+     * than centered in a 256px band -- otherwise the spiral's arms stop dead at the
+     * gutter edge and the outer columns stay unaffected until the final frames.
+     * Windows that align with 256px content (text windows, PSI masks) must keep the
+     * centered mapping, so this is opt-in and set only by oval_window.c.
+     * No effect when EB_VIEWPORT_WIDTH equals SNES_WIDTH. */
+    bool window_wide_scale;
+
     /* Per-layer viewport mode (C port extension, not real SNES hardware).
      * Controls how each BG layer fills the extended viewport area.
      * Has no effect when EB_VIEWPORT_WIDTH equals SNES_WIDTH.

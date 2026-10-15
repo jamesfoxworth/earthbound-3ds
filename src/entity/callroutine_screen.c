@@ -442,6 +442,7 @@ void dispatch_tick_callback(uint32_t rom_addr, int16_t entity_offset) {
             }
         }
         ppu.window_hdma_active = true;
+        ppu.window_wide_scale = false;
         /* ENABLE_OBJ_HDMA sets WOBJSEL to enable both color windows */
         ppu.wobjsel = 0xA0;
         break;
@@ -451,6 +452,7 @@ void dispatch_tick_callback(uint32_t rom_addr, int16_t entity_offset) {
          * Builds oval window around entity using WH0/WH1 (HDMA channel 4). */
         render_entity_hdma_window(entity_offset, ppu.wh0_table, ppu.wh1_table);
         ppu.window_hdma_active = true;
+        ppu.window_wide_scale = false;
         break;
     case TICK_ADDR_SETUP_ENTITY_HDMA_WINDOW_CH5:
         /* C47705: SETUP_ENTITY_HDMA_WINDOW_CH5 — per-frame tick callback.
@@ -495,6 +497,7 @@ void dispatch_tick_callback(uint32_t rom_addr, int16_t entity_offset) {
             }
         }
         ppu.window_hdma_active = true;
+        ppu.window_wide_scale = false;
         ppu.wobjsel = 0xA0;
         break;
     }

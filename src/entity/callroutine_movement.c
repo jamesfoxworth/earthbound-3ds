@@ -850,6 +850,7 @@ int16_t cr_movement_cmd_setup_spotlight(int16_t entity_offset, int16_t script_of
     }
 
     ppu.window_hdma_active = true;
+    ppu.window_wide_scale = false;
     return 0;
 }
 
