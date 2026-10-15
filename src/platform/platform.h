@@ -81,12 +81,14 @@ extern int platform_visible_width;
  * A port that has no UI of its own never writes these. */
 typedef enum {
     HOST_MODE_REQ_NONE = 0,
-    HOST_MODE_REQ_USE_ITEM,   /* a = 1-based character, b = inventory slot */
+    HOST_MODE_REQ_USE_ITEM,   /* a = member id, b = 1-based inventory slot */
+    HOST_MODE_REQ_SHOW_TEXT,  /* addr = script address to display */
 } HostModeRequest;
 
 extern HostModeRequest host_mode_request;
 extern uint16_t host_mode_req_a;
 extern uint16_t host_mode_req_b;
+extern uint32_t host_mode_req_addr;
 
 /*
  * Input

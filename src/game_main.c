@@ -1414,6 +1414,20 @@ StepResult mode_step_overworld(ModeState *mst) {
                     st->phase = OWP_POST_TELEPORT;
                     return STEP_RESULT_PUSH_INIT(GAME_MODE_USE_ITEM, &child);
                 }
+                if (host_mode_request == HOST_MODE_REQ_SHOW_TEXT) {
+                    /* Item help, the way the pause menu shows it: a standard
+                     * text window plus a DISPLAY_TEXT child seeded from the
+                     * item config's help_text address. */
+                    uint32_t req_addr = host_mode_req_addr;
+                    host_mode_request = HOST_MODE_REQ_NONE;
+                    child = (ModeState){0};
+                    if (dt_make_child_init(&child, req_addr)) {
+                        create_window(WINDOW_TEXT_STANDARD);
+                        st->phase = OWP_POST_TELEPORT;
+                        return STEP_RESULT_PUSH_INIT(GAME_MODE_DISPLAY_TEXT,
+                                                     &child);
+                    }
+                }
                 if (core.pad1_pressed & PAD_A) {
                     child = (ModeState){0};
                     child.pause_menu.phase = PM_ENTER;

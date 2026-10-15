@@ -397,6 +397,10 @@ static pixel_t font_cell_bg_c;
 
 static pixel_t game_text_ink(void)  { return bgr555_to_pixel(ppu.cgram[1]); }
 static pixel_t game_text_back(void) { return bgr555_to_pixel(ppu.cgram[3]); }
+/* Colour 2 of the same sub-palette: the mid tone. An unselected label drawn
+ * in the BACKGROUND colour is invisible, since that is what the opaque cell
+ * behind it is filled with. */
+static pixel_t game_text_dim(void)  { return bgr555_to_pixel(ppu.cgram[2]); }
 
 static int draw_glyphs(int x, int y, const uint8_t *idx,
                        int count, int scale, pixel_t color) {
@@ -575,7 +579,7 @@ static int draw_label_box(const char *label, bool active, int x, int dest_y) {
     font_cell_bg = true;
     font_cell_bg_c = game_text_back();
     draw_ascii(x + 8, ty, label, 1,
-               active ? game_text_ink() : game_text_back());
+               active ? game_text_ink() : game_text_dim());
     font_cell_bg = false;
     font_id_cur = prev;
     return box_w;
@@ -776,6 +780,21 @@ static int item_hit_count;
  * the name rather than as controls. */
 static struct { int x, y, w, h; } tab_hit[2];
 
+/* Nested item action menu, like WINDOW_INVENTORY_MENU in the real inventory
+ * screen (config 0x03: 6 tiles wide, 10 tall). Opened by tapping an item
+ * instead of using it outright -- a tap used to eat the Cookie with no
+ * confirmation. Use and Help! are wired; Give and Drop are driven inline by
+ * the pause menu's own window and character-select machinery rather than by
+ * a pushable mode, so they are shown dimmed rather than half-working. */
+#define IMENU_TILES_W 6
+#define IMENU_TILES_H 10
+#define IMENU_W       (IMENU_TILES_W * 8)
+#define IMENU_H       (IMENU_TILES_H * 8)
+
+static int  item_menu_slot = -1;   /* 0-based inventory slot, -1 = closed */
+static struct { int x, y, w, h; int action; } imenu_hit[4];
+static int imenu_hit_count;
+
 /* Card hit rects, filled in as the cards are drawn. */
 static struct { int x, y, w, h; } card_hit[HPPP_MAX_PARTY];
 static int card_hit_count;
@@ -862,18 +881,25 @@ static void draw_goods_panel(void) {
                 }
                 /* The game's own suffix label (a/b/g/S/O glyphs): several
                  * table entries share one name and differ only by level, so
-                 * without it a learned Lifeup a and b read identically. */
+                 * without it a learned Lifeup a and b read identically. A
+                 * space before it keeps "Lifeup a" from running together. */
                 char suffix[4];
                 get_psi_suffix_label(i, suffix, sizeof(suffix));
-                if (suffix[0])
-                    ax += draw_ascii(ax, cy, suffix, 1, ink);
+                if (suffix[0]) {
+                    ax += draw_ascii(ax, cy, " ", 1, ink);
+                    draw_ascii(ax, cy, suffix, 1, ink);
+                }
 
+                /* PP cost right-aligned at the column edge rather than
+                 * trailing the name, so the numbers line up in a readable
+                 * column instead of crowding whatever the name ended on. */
                 char cost[12];
-                snprintf(cost, sizeof(cost), " %u",
+                snprintf(cost, sizeof(cost), "%u",
                          (unsigned)(battle_action_table
                                     ? (battle_action_table[psi->battle_action]
                                        .pp_cost & 0xFF) : 0));
-                draw_ascii(ax, cy, cost, 1, ink);
+                int cw = measure_ascii(cost);
+                draw_ascii(cx + col_w - 14 - cw, cy, cost, 1, ink);
                 shown++;
             }
         }
@@ -901,6 +927,41 @@ static void draw_goods_panel(void) {
     font_id_cur = prev;
 }
 
+static void draw_item_menu(void) {
+    if (item_menu_slot < 0)
+        return;
+    int prev = font_id_cur;
+    font_id_cur = EB_PANEL_FONT;
+    if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
+
+    const int x = GOODS_X + GOODS_BOX_W - IMENU_W - 6;
+    const int y = GOODS_Y + 6;
+    draw_window_box(IMENU_TILES_W, IMENU_TILES_H, x, y);
+
+    static const char *const names[4] = { "Use", "Give", "Drop", "Help!" };
+    const bool wired[4] = { true, false, false, true };
+    const int line_h = font_get_height(font_id_cur) + 1;
+
+    font_cell_bg = true;
+    font_cell_bg_c = game_text_back();
+    imenu_hit_count = 0;
+    for (int i = 0; i < 4; i++) {
+        int ly = y + 8 + i * line_h;
+        draw_ascii(x + 8, ly, names[i], 1,
+                   wired[i] ? game_text_ink() : game_text_dim());
+        if (wired[i]) {
+            imenu_hit[imenu_hit_count].x = x;
+            imenu_hit[imenu_hit_count].y = ly - 2;
+            imenu_hit[imenu_hit_count].w = IMENU_W;
+            imenu_hit[imenu_hit_count].h = line_h;
+            imenu_hit[imenu_hit_count].action = i;
+            imenu_hit_count++;
+        }
+    }
+    font_cell_bg = false;
+    font_id_cur = prev;
+}
+
 /* Tapping a card selects whose Goods are listed. */
 static bool goods_handle_touch(const TouchState *t) {
     if (!t->pressed)
@@ -915,6 +976,40 @@ static bool goods_handle_touch(const TouchState *t) {
     }
     /* Each half of the tab selects its own side rather than toggling, so a
      * tap on the label you can already see is a no-op instead of a surprise. */
+    /* The action menu owns taps while it is open. */
+    if (item_menu_slot >= 0) {
+        for (int i = 0; i < imenu_hit_count; i++) {
+            if (!touch_in(t, imenu_hit[i].x, imenu_hit[i].y,
+                          imenu_hit[i].w, imenu_hit[i].h))
+                continue;
+            int slot = item_menu_slot;
+            int count = game_state.player_controlled_party_count;
+            uint8_t mid = (goods_character < count)
+                          ? game_state.party_members[goods_character] : 0;
+            item_menu_slot = -1;
+            if (mid < 1 || mid > TOTAL_PARTY_COUNT)
+                return true;
+
+            /* char_id is a MEMBER id and item_slot is 1-based: the game reads
+             * party_characters[char_id - 1].items[slot - 1]. */
+            if (imenu_hit[i].action == 0) {
+                host_mode_req_a = mid;
+                host_mode_req_b = (uint16_t)(slot + 1);
+                host_mode_request = HOST_MODE_REQ_USE_ITEM;
+            } else {
+                uint8_t id = party_characters[mid - 1].items[slot];
+                const ItemConfig *it = id ? get_item_entry(id) : NULL;
+                if (it) {
+                    host_mode_req_addr = it->help_text & 0xFFFFFF;
+                    host_mode_request = HOST_MODE_REQ_SHOW_TEXT;
+                }
+            }
+            return true;
+        }
+        item_menu_slot = -1;   /* tap elsewhere closes it */
+        return true;
+    }
+
     for (int i = 0; i < 2; i++) {
         if (tab_hit[i].w && touch_in(t, tab_hit[i].x, tab_hit[i].y,
                                      tab_hit[i].w, tab_hit[i].h)) {
@@ -929,19 +1024,7 @@ static bool goods_handle_touch(const TouchState *t) {
     for (int i = 0; i < item_hit_count; i++) {
         if (touch_in(t, item_hit[i].x, item_hit[i].y,
                      item_hit[i].w, item_hit[i].h)) {
-            /* char_id is a MEMBER id and item_slot is 1-based: the game reads
-             * party_characters[char_id - 1].items[slot - 1]. Passing the party
-             * slot and a 0-based index is why a tap used the item above, and
-             * why the first row acted as nothing (slot 0 = "no item"). */
-            int count = game_state.player_controlled_party_count;
-            if (goods_character < count) {
-                uint8_t mid = game_state.party_members[goods_character];
-                if (mid >= 1 && mid <= TOTAL_PARTY_COUNT) {
-                    host_mode_req_a = mid;
-                    host_mode_req_b = (uint16_t)(item_hit[i].slot + 1);
-                    host_mode_request = HOST_MODE_REQ_USE_ITEM;
-                }
-            }
+            item_menu_slot = item_hit[i].slot;
             return true;
         }
     }
@@ -1129,8 +1212,10 @@ static void draw_bottom_panel(void) {
 
     /* The game's own HP/PP panels, identical to the battle ones, centred. */
     bool have_cards = draw_overworld_hppp(HPPP_CARDS_Y) > 0;
-    if (have_cards)
+    if (have_cards) {
         draw_goods_panel();
+        draw_item_menu();
+    }
     if (options_open)
         draw_options_panel();
     if (have_cards)
@@ -1310,6 +1395,7 @@ void platform_video_end_frame(void) {
             sig = (sig ^ game_state.money_carried) * 16777619u;
             sig = (sig ^ (uint32_t)goods_character) * 16777619u;
             sig = (sig ^ (uint32_t)goods_psi_tab) * 16777619u;
+            sig = (sig ^ (uint32_t)(item_menu_slot + 1)) * 16777619u;
             for (int i = 0; i < count && i < HPPP_MAX_PARTY; i++) {
                 uint8_t member_id = game_state.party_members[i];
                 if (member_id == 0 || member_id > TOTAL_PARTY_COUNT)
