@@ -346,13 +346,15 @@ static void draw_tilemap_rect(int tile_x, int tile_y,
 
 /* Draw one glyph run. Glyph rows are bitmasks where a CLEAR bit is ink (the
  * convention font_get_glyph uses). Returns the advance in pixels. */
+static int font_id_cur = FONT_ID_TINY;
+
 static int draw_glyphs(int x, int y, const uint8_t *idx,
                        int count, int scale, pixel_t color) {
-    uint8_t h = font_get_height(FONT_ID_TINY);
+    uint8_t h = font_get_height(font_id_cur);
     int cx = x;
     for (int i = 0; i < count; i++) {
-        const uint8_t *glyph = font_get_glyph(FONT_ID_TINY, idx[i]);
-        uint8_t w = font_get_width(FONT_ID_TINY, idx[i]);
+        const uint8_t *glyph = font_get_glyph(font_id_cur, idx[i]);
+        uint8_t w = font_get_width(font_id_cur, idx[i]);
         if (glyph) {
             for (int row = 0; row < h; row++) {
                 uint8_t bits = glyph[row];
@@ -396,6 +398,67 @@ static int draw_eb(int x, int y, const uint8_t *eb, int max,
 /* The window shown on the bottom screen, or NULL. With the window layer off
  * on the top screen, battle dialogue comes down here too, otherwise it would
  * not be visible at all. */
+/* The game's own window frame, drawn into a scratch tilemap and rasterised
+ * with the game's tiles -- the same border entries render_all_windows() uses,
+ * so the box matches every other window on screen including the player's
+ * chosen flavour palette.
+ *
+ * This is assembled here rather than by creating a real window: there is no
+ * per-window render entry point (only render_all_windows), and create_window()
+ * mid-frame would take over win.current_focus_window while a dialogue may be
+ * using it. */
+#define WFRAME_TL     0x3C10
+#define WFRAME_TOP    0x3C11
+#define WFRAME_LEFT   0x3C12
+#define WFRAME_TR     0x7C10
+#define WFRAME_RIGHT  0x7C12
+#define WFRAME_BL     0xBC10
+#define WFRAME_BOTTOM 0xBC11
+#define WFRAME_BR     0xFC10
+#define WFRAME_FILL   (0x2000 | 0x40)
+
+static uint8_t frame_scratch[2048];
+
+static void draw_window_box(int tiles_w, int tiles_h, int dest_x, int dest_y) {
+    memset(frame_scratch, 0, sizeof(frame_scratch));
+    for (int ty = 0; ty < tiles_h && ty < 32; ty++) {
+        for (int tx = 0; tx < tiles_w && tx < 32; tx++) {
+            bool t = (ty == 0), b = (ty == tiles_h - 1);
+            bool l = (tx == 0), r = (tx == tiles_w - 1);
+            uint16_t e = t && l ? WFRAME_TL : t && r ? WFRAME_TR
+                       : t      ? WFRAME_TOP
+                       : b && l ? WFRAME_BL : b && r ? WFRAME_BR
+                       : b      ? WFRAME_BOTTOM
+                       : l      ? WFRAME_LEFT
+                       : r      ? WFRAME_RIGHT : WFRAME_FILL;
+            size_t o = ((size_t)ty * 32 + tx) * 2;
+            frame_scratch[o]     = (uint8_t)(e & 0xFF);
+            frame_scratch[o + 1] = (uint8_t)(e >> 8);
+        }
+    }
+    draw_tilemap_rect_src(frame_scratch, 0, 0, tiles_w, tiles_h,
+                          dest_x, dest_y, 1);
+}
+
+/* Carried money, in the same box the B menu shows it in. */
+static void draw_money_box(int dest_x, int dest_y) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "$%lu", (unsigned long)game_state.money_carried);
+
+    int prev = font_id_cur;
+    font_id_cur = FONT_ID_NORMAL;
+    if (!font_get_glyph(font_id_cur, 0)) {   /* main font not resident yet */
+        font_id_cur = prev;
+        return;
+    }
+
+    int tiles_w = 2 + (int)strlen(buf);
+    if (tiles_w > 12) tiles_w = 12;
+    draw_window_box(tiles_w, 3, dest_x, dest_y);
+    draw_ascii(dest_x + 8, dest_y + 8, buf, 1, PIXEL_RGB(255, 255, 255));
+    font_id_cur = prev;
+}
+
 static const WindowInfo *routed_menu_window(void) {
     const WindowInfo *w = focused_window();
     if (!w || w->width == 0 || w->height == 0)
@@ -463,6 +526,7 @@ static void draw_battle_bottom(void) {
  *
  * Returns 0 if nothing could be drawn (no party yet, or the window tiles are
  * not resident), so the caller can fall back to the composed text panel. */
+#define HPPP_OW_MARGIN_X  6
 #define HPPP_SHADOW_ROW0  ACTIVE_HPPP_WINDOW_Y_OFFSET
 #define HPPP_SHADOW_ROWS  (HPPP_WINDOW_HEIGHT + 2)
 
@@ -472,8 +536,10 @@ static int draw_overworld_hppp(int dest_y) {
     if (count <= 0)
         return 0;
 
+    /* Outside battle the cards sit left, leaving the top right for the money
+     * box and (later) the options entry. Battle keeps its centred row. */
     const int panel_px_w0 = HPPP_WINDOW_WIDTH * 8;
-    const int ox0 = (BOTTOM_WIDTH - count * panel_px_w0) / 2;
+    const int ox0 = HPPP_OW_MARGIN_X;
 
     /* The game is already rendering its own HP/PP windows (the B menu), so
      * they are live in VRAM. Read those rather than running a second draw --
@@ -512,8 +578,7 @@ static int draw_overworld_hppp(int dest_y) {
         draw_hp_pp_window((uint16_t)i);
 
     const int panel_px_w = HPPP_WINDOW_WIDTH * 8;
-    const int row_w = count * panel_px_w;
-    const int ox = (BOTTOM_WIDTH - row_w) / 2;
+    const int ox = HPPP_OW_MARGIN_X;
     const int ty = NORMAL_HPPP_WINDOW_Y_OFFSET;
 
     int drawn = 0;
@@ -541,9 +606,17 @@ static void draw_bottom_panel(void) {
 
     fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, bg);
 
-    /* Preferred: the game's own HP/PP panels, identical to the battle ones. */
-    if (draw_overworld_hppp(6) > 0)
+    /* Preferred: the game's own HP/PP panels, identical to the battle ones,
+     * left-aligned with the money box in the top right. */
+    if (draw_overworld_hppp(6) > 0) {
+        int count = game_state.player_controlled_party_count;
+        if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
+        int cards_right = HPPP_OW_MARGIN_X + count * HPPP_WINDOW_WIDTH * 8;
+        int mx = cards_right + 8;
+        if (mx < BOTTOM_WIDTH - 8)
+            draw_money_box(mx, 6);
         return;
+    }
 
     /* Fallback -- composed text, used before the window tiles are resident
      * (title screen, file select, the first frames of a load). */
@@ -644,13 +717,23 @@ void platform_video_end_frame(void) {
         static int res_wait;
         static int present_left;
 
-        /* Nothing to report until a save is actually running. GAME_MODE_
-         * OVERWORLD is pushed once at the boot->overworld handoff and stays
-         * the root for the rest of the session, so this is false on the
-         * title screen and through the file-select cascade -- where the
-         * party struct holds whatever the last-previewed slot left behind. */
+        /* Nothing to report until a save is actually running, or the party
+         * struct still holds whatever the last previewed file-select slot
+         * left behind.
+         *
+         * The root mode is NOT the signal: GAME_MODE_OVERWORLD is pushed in
+         * game_init() and never popped, so it is the root from the first
+         * frame and the intro, title and file-select cascade all run inside
+         * it as its OWP_BOOT_* phases. The root's phase is the signal -- it
+         * leaves the boot phases only at the handoff to actual play, and a
+         * game-over "Continue" resets it to OWP_BOOT_SETUP, which correctly
+         * blanks the panel through the reboot. */
+        uint8_t root_phase = g_mode_stack.state[0].overworld.phase;
         bool in_game = (g_mode_stack.depth > 0 &&
-                        g_mode_stack.mode[0] == GAME_MODE_OVERWORLD);
+                        g_mode_stack.mode[0] == GAME_MODE_OVERWORLD &&
+                        root_phase != OWP_BOOT_SETUP &&
+                        root_phase != OWP_BOOT_AWAIT &&
+                        root_phase != OWP_BOOT_FLUSH);
 
         int context = !in_game ? 2 : (ow.battle_mode ? 1 : 0);
         if (context != last_context) {
@@ -685,6 +768,7 @@ void platform_video_end_frame(void) {
             uint32_t sig = 2166136261u;
             int count = game_state.player_controlled_party_count;
             sig = (sig ^ (uint32_t)count) * 16777619u;
+            sig = (sig ^ game_state.money_carried) * 16777619u;
             for (int i = 0; i < count && i < HPPP_MAX_PARTY; i++) {
                 uint8_t member_id = game_state.party_members[i];
                 if (member_id == 0 || member_id > TOTAL_PARTY_COUNT)
