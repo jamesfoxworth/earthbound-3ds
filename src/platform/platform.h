@@ -93,6 +93,11 @@ extern uint16_t host_mode_req_b;
 extern uint16_t host_mode_req_c;
 extern uint32_t host_mode_req_addr;
 
+/* Port-settable presentation options. A port with a settings UI can flip
+ * these at runtime; one without simply leaves them at their defaults, which
+ * are the game's original behaviour. */
+extern bool host_opt_no_battle_letterbox;
+
 /*
  * Input
  *

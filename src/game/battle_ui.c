@@ -726,6 +726,11 @@ void apply_letterbox_to_ppu(void);
  *   letterbox_style: 0=none, 1=large, 2=medium, 3=small; bit 2 = 4bpp layer 2
  */
 void load_battle_bg(uint16_t layer1_id, uint16_t layer2_id, uint16_t letterbox_style) {
+    /* Runtime equivalent of EB_NO_BATTLE_LETTERBOX, for ports with a settings
+     * UI. Read at battle-background load time, so a mid-battle toggle takes
+     * effect from the next battle. */
+    if (host_opt_no_battle_letterbox)
+        letterbox_style = 0;
 #ifdef EB_NO_BATTLE_LETTERBOX
     /* EarthBound letterboxes the battle scene on purpose, masking layers off
      * on the top and bottom scanlines. A port with the UI on a second screen

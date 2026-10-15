@@ -25,6 +25,7 @@ uint16_t host_mode_req_a;
 uint16_t host_mode_req_b;
 uint16_t host_mode_req_c;
 uint32_t host_mode_req_addr;
+bool host_opt_no_battle_letterbox;
 
 void platform_render_frame(scanline_stamp_cb_t fps_overlay_cb) {
     platform_video_begin_frame();

@@ -397,12 +397,24 @@ static pixel_t font_cell_bg_c;
 
 static pixel_t game_text_ink(void)  { return bgr555_to_pixel(ppu.cgram[1]); }
 static pixel_t game_text_back(void) { return bgr555_to_pixel(ppu.cgram[3]); }
-/* Inactive / unavailable text is the ink colour at 50% coverage rather than a
- * different palette entry. Colour 3 is the cell background, so drawing in it
- * is invisible; colour 2 is a flavour-dependent hue -- green in some
- * flavours -- which read as emphasis rather than as greyed out. A dither
- * depends on no palette contents and always reads as unavailable. */
-static bool font_dither;
+/* Inactive / unavailable text: the ink and the cell background mixed half
+ * and half, computed per channel rather than taken from a palette slot.
+ *
+ * Colour 3 is the cell background, so drawing in it is invisible. Colour 2 is
+ * a flavour-dependent hue -- green in some flavours -- so it read as emphasis
+ * rather than as greyed out. A 50% dither was legible at a glance only in
+ * theory: these glyphs are a few pixels across, so dropping every other pixel
+ * destroys the letterforms and reads as a rendering fault. A true mid tone
+ * keeps every pixel and just lowers the contrast. */
+static pixel_t game_text_dim(void) {
+    uint16_t a = ppu.cgram[1], b = ppu.cgram[3];
+    uint16_t mix = (uint16_t)((((a & 0x1F) + (b & 0x1F)) / 2) |
+                   (((((a >> 5) & 0x1F) + ((b >> 5) & 0x1F)) / 2) << 5) |
+                   (((((a >> 10) & 0x1F) + ((b >> 10) & 0x1F)) / 2) << 10));
+    return bgr555_to_pixel(mix);
+}
+
+static bool font_dither;   /* retained for the scroll arrows only */
 
 static int draw_glyphs(int x, int y, const uint8_t *idx,
                        int count, int scale, pixel_t color) {
@@ -587,9 +599,8 @@ static int draw_label_box(const char *label, bool active, int x, int dest_y) {
     int ty = inner_y + (inner_h - font_get_height(font_id_cur)) / 2;
     font_cell_bg = true;
     font_cell_bg_c = game_text_back();
-    font_dither = !active;
-    draw_ascii(x + 8, ty, label, 1, game_text_ink());
-    font_dither = false;
+    draw_ascii(x + 8, ty, label, 1,
+               active ? game_text_ink() : game_text_dim());
     font_cell_bg = false;
     font_id_cur = prev;
     return box_w;
@@ -659,10 +670,16 @@ typedef struct {
 } OptionRow;
 
 bool video_opt_fps;
+bool video_opt_battle_bg = true;
+/* Shown as the player sees it -- Letterbox On means bars present -- and
+ * inverted when handed to the game, whose flag is a disable. */
+static bool opt_letterbox_on = true;
 
 static const OptionRow option_rows[] = {
-    { "Screen",     NULL,            &video_opt_view_width },
-    { "FPS meter",  &video_opt_fps,  NULL },
+    { "Screen",      NULL,                   &video_opt_view_width },
+    { "Battle b.g.", &video_opt_battle_bg,   NULL },
+    { "Letterbox",   &opt_letterbox_on,      NULL },
+    { "FPS meter",   &video_opt_fps,         NULL },
 };
 #define OPTION_ROW_COUNT ((int)(sizeof(option_rows) / sizeof(option_rows[0])))
 
@@ -734,6 +751,8 @@ static bool options_handle_touch(const TouchState *t) {
                 *r->flag = !*r->flag;
                 if (r->flag == &video_opt_fps)
                     input_pulse_fps_toggle();
+                else if (r->flag == &opt_letterbox_on)
+                    host_opt_no_battle_letterbox = !opt_letterbox_on;
             } else {
                 int k = 0;
                 for (int j = 0; j < VIEW_WIDTH_COUNT; j++)
@@ -855,12 +874,7 @@ static void draw_goods_panel(void) {
     titlex += draw_eb(titlex, GOODS_Y, ch->name, 5, 1, ink);
     /* Tab marker sits in the title row too, so the list keeps the whole
      * interior. Tapping it swaps Goods <-> PSI. */
-    if (psi_armed) {
-        font_cell_bg = true;
-        font_cell_bg_c = game_text_back();
-        draw_ascii(titlex + 10, GOODS_Y, "- on whom?", 1, ink);
-        font_cell_bg = false;
-    }
+    (void)titlex;
     font_id_cur = EB_PANEL_FONT;
 
     /* Derive the row count from the real font height rather than assuming
@@ -925,7 +939,7 @@ static void draw_goods_panel(void) {
                     : 0;
                 bool usable = (psi->category != PSI_CAT_OTHER) &&
                               (cost_pp <= ch->current_pp);
-                font_dither = !usable;
+                const pixel_t row_c = usable ? ink : game_text_dim();
                 if (psi_hit_count < (int)(sizeof(psi_hit) / sizeof(psi_hit[0]))) {
                     psi_hit[psi_hit_count].x = cx;
                     psi_hit[psi_hit_count].y = cy - 2;
@@ -937,12 +951,12 @@ static void draw_goods_panel(void) {
                 }
                 const uint8_t *nm = psi_name_entry(psi->name);
                 if (nm) {
-                    ax += draw_eb(ax, cy, nm, 24, 1, ink);
+                    ax += draw_eb(ax, cy, nm, 24, 1, row_c);
                 } else if (psi->name == 1) {
                     /* PSI Rockin: the name is the player's favourite thing. */
                     ax += draw_eb(ax, cy, game_state.favourite_thing,
                                   (int)sizeof(game_state.favourite_thing),
-                                  1, ink);
+                                  1, row_c);
                 }
                 /* The game's own suffix label (a/b/g/S/O glyphs): several
                  * table entries share one name and differ only by level, so
@@ -951,8 +965,8 @@ static void draw_goods_panel(void) {
                 char suffix[4];
                 get_psi_suffix_label(i, suffix, sizeof(suffix));
                 if (suffix[0]) {
-                    ax += draw_ascii(ax, cy, " ", 1, ink);
-                    draw_ascii(ax, cy, suffix, 1, ink);
+                    ax += draw_ascii(ax, cy, " ", 1, row_c);
+                    draw_ascii(ax, cy, suffix, 1, row_c);
                 }
 
                 /* PP cost right-aligned at the column edge rather than
@@ -964,8 +978,7 @@ static void draw_goods_panel(void) {
                                     ? (battle_action_table[psi->battle_action]
                                        .pp_cost & 0xFF) : 0));
                 int cw = measure_ascii(cost);
-                draw_ascii(cx + col_w - 14 - cw, cy, cost, 1, ink);
-                font_dither = false;
+                draw_ascii(cx + col_w - 14 - cw, cy, cost, 1, row_c);
                 /* The armed ability is marked, and the window title row says
                  * what to do next, so an armed cast is never a silent state. */
                 if (psi_armed == i)
@@ -1060,9 +1073,8 @@ static void draw_item_menu(void) {
     imenu_hit_count = 0;
     for (int i = 0; i < 4; i++) {
         int ly = y + 8 + i * line_h;
-        font_dither = !wired[i];
-        draw_ascii(x + 8, ly, names[i], 1, game_text_ink());
-        font_dither = false;
+        draw_ascii(x + 8, ly, names[i], 1,
+                   wired[i] ? game_text_ink() : game_text_dim());
         if (wired[i]) {
             imenu_hit[imenu_hit_count].x = x;
             imenu_hit[imenu_hit_count].y = ly - 2;
@@ -1197,9 +1209,21 @@ static const WindowInfo *routed_menu_window(void) {
  * beneath them -- the game has already drawn both into the window layer, so
  * these are its own panels, not a reconstruction. */
 static void draw_battle_bottom(void) {
-    const pixel_t bg = PIXEL_RGB(0, 0, 0);
-
-    fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, bg);
+    /* The battle scene behind the panels. This is the composited top-screen
+     * frame scaled to the bottom screen, so it carries the background exactly
+     * as drawn -- letterbox bars and all -- but also the enemy sprites, since
+     * a port only ever receives finished scanlines. Isolating the BG layers
+     * would mean a second full PPU pass, which battle has no headroom for. */
+    if (video_opt_battle_bg) {
+        for (int y = 0; y < BOTTOM_HEIGHT; y++) {
+            const pixel_t *src = &frame[y * EB_VIEWPORT_WIDTH];
+            pixel_t *dst = &bottom_img[y * BOTTOM_WIDTH];
+            for (int x = 0; x < BOTTOM_WIDTH; x++)
+                dst[x] = src[(x * EB_VIEWPORT_WIDTH) / BOTTOM_WIDTH];
+        }
+    } else {
+        fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, PIXEL_RGB(0, 0, 0));
+    }
 
     int count = game_state.player_controlled_party_count;
     if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
@@ -1370,6 +1394,19 @@ static void draw_bottom_panel(void) {
     if (have_cards) {
         draw_goods_panel();
         draw_item_menu();
+        /* An armed PSI marks the cards rather than printing a prompt in the
+         * panel: the question is "which of these", so asking it on the
+         * things being chosen is both clearer and keeps the panel clean. */
+        if (psi_armed) {
+            const pixel_t c = game_text_ink();
+            for (int i = 0; i < card_hit_count; i++) {
+                int mx = card_hit[i].x + card_hit[i].w / 2;
+                int my = card_hit[i].y + card_hit[i].h + 2;
+                for (int yy = 0; yy < 6; yy++)
+                    for (int xx = -(5 - yy); xx <= (5 - yy); xx++)
+                        img_px(mx + xx, my + yy, c);
+            }
+        }
     }
     if (options_open)
         draw_options_panel();
