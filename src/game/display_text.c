@@ -125,8 +125,15 @@ bool queue_text_prefix(ScriptReader *r, const uint8_t *data, int max_len) {
     int n = max_len;
     if (n > (int)sizeof(text_prefix_buf) - 1)
         n = (int)sizeof(text_prefix_buf) - 1;
+    /* Stop at the first byte that is not printable EB text. 0x50 is the base
+     * the font is indexed from (glyph = ch - 0x50), so anything below it is a
+     * terminator, a control code, or padding in a different encoding -- the
+     * battle name fields are char buffers and need not be EB-space padded.
+     * Queueing those bytes would type dozens of junk glyphs and march the
+     * cursor across the line, which looks like the text jumping about and
+     * varies with the message. */
     for (int i = 0; i < n; i++) {
-        if (data[i] == 0x00) {
+        if (data[i] < 0x50) {
             n = i;
             break;
         }

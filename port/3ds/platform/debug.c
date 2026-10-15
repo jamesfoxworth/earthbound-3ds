@@ -13,6 +13,7 @@
 
 #include "snes/ppu.h"
 #include "game/window.h"
+#include "game/overworld.h"
 
 static int debug_dump_counter = 0;
 
@@ -142,6 +143,28 @@ void platform_debug_dump_ppu(const pixel_t *framebuffer) {
         fprintf(f, "TS       = $%02X\n", ppu.ts);
         fprintf(f, "CGWSEL   = $%02X\n", ppu.cgwsel);
         fprintf(f, "CGADSUB  = $%02X\n", ppu.cgadsub);
+        /* Window state. The battle swirl is an oval-window animation, so this
+         * is what says whether its mask is installed and moving. */
+        fprintf(f, "WINDOW   = hdma=%d win2_hdma=%d tm_hdma=%d\n",
+                (int)ppu.window_hdma_active, (int)ppu.window2_hdma_active,
+                (int)ppu.tm_hdma_active);
+        fprintf(f, "WH0..3   = $%02X $%02X $%02X $%02X\n",
+                ppu.wh0, ppu.wh1, ppu.wh2, ppu.wh3);
+        fprintf(f, "W12SEL   = $%02X  W34SEL = $%02X  WOBJSEL = $%02X\n",
+                ppu.w12sel, ppu.w34sel, ppu.wobjsel);
+        fprintf(f, "WBGLOG   = $%02X  TMW = $%02X  TSW = $%02X\n",
+                ppu.wbglog, ppu.tmw, ppu.tsw);
+        if (ppu.window_hdma_active) {
+            static const int rows[5] = { 40, 80, 120, 160, 200 };
+            fprintf(f, "wh0/wh1 per row: ");
+            for (int i = 0; i < 5; i++)
+                fprintf(f, "[%d]=%u-%u ", rows[i],
+                        (unsigned)ppu.wh0_table[rows[i]],
+                        (unsigned)ppu.wh1_table[rows[i]]);
+            fprintf(f, "\n");
+        }
+        fprintf(f, "swirl_countdown = %u  battle_mode = %u\n",
+                (unsigned)ow.battle_swirl_countdown, (unsigned)ow.battle_mode);
         fclose(f);
     }
     printf("Debug: wrote %s\n", path);
