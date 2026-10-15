@@ -269,20 +269,31 @@ static void fill_rect(int x, int y, int w, int h, pixel_t c) {
  * drawn can be redrawn here from the game's own tiles. Base addresses and the
  * index-0-is-transparent rule follow ppu_render.c. Brightness is deliberately
  * not applied so the panel stays readable while the world fades. */
-static void draw_tilemap_rect(int tile_x, int tile_y,
-                              int tiles_w, int tiles_h,
-                              int dest_x, int dest_y, int scale) {
+static void draw_tilemap_rect_src(const uint8_t *shadow,
+                                  int tile_x, int tile_y,
+                                  int tiles_w, int tiles_h,
+                                  int dest_x, int dest_y, int scale) {
     const uint32_t map_base  = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
     const uint32_t tile_base = (uint32_t)(ppu.bg_nba[1] & 0x0F) * 0x2000;
 
     for (int ty = 0; ty < tiles_h; ty++) {
         for (int tx = 0; tx < tiles_w; tx++) {
+            uint16_t entry;
+            if (shadow) {
+                /* win.bg2_buffer is the game's RAM shadow of this same 32x32
+                 * tilemap, 2 bytes per entry. Tile graphics still come from
+                 * VRAM -- only the entries differ. */
+                size_t so = ((size_t)(((tile_y + ty) & 31) * 32
+                                      + ((tile_x + tx) & 31))) * 2;
+                entry = read_u16_le(&shadow[so]);
+            } else {
             uint32_t entry_addr = map_base +
                 ((size_t)(((tile_y + ty) & 31) * 32 + ((tile_x + tx) & 31))) * 2;
             if (entry_addr + 1 >= VRAM_SIZE)
                 continue;
 
-            uint16_t entry    = read_u16_le(&ppu.vram[entry_addr]);
+            entry = read_u16_le(&ppu.vram[entry_addr]);
+            }
             uint16_t tile_num = entry & 0x3FF;
             uint8_t  palette  = (entry >> 10) & 0x07;
             bool     hflip    = (entry >> 14) & 1;
@@ -312,6 +323,13 @@ static void draw_tilemap_rect(int tile_x, int tile_y,
             }
         }
     }
+}
+
+static void draw_tilemap_rect(int tile_x, int tile_y,
+                              int tiles_w, int tiles_h,
+                              int dest_x, int dest_y, int scale) {
+    draw_tilemap_rect_src(NULL, tile_x, tile_y, tiles_w, tiles_h,
+                          dest_x, dest_y, scale);
 }
 
 /* ---- Bottom-screen panel -------------------------------------------------
@@ -429,12 +447,105 @@ static void draw_battle_bottom(void) {
                       (BOTTOM_WIDTH - menu_w) / 2, my, 1);
 }
 
+/* Rasterise the four HP/PP panels at the top of the bottom screen, the same
+ * way draw_battle_bottom() does, and report the pixel row they end at.
+ *
+ * In battle the game has already drawn its panels into the window layer, so
+ * that path just copies them out of VRAM. On the overworld it only draws them
+ * when it decides to (the B menu), so here we drive the game's own
+ * draw_hp_pp_window() into a SCRATCH COPY of win.bg2_buffer -- its RAM shadow
+ * of the window tilemap -- and rasterise from that. The real shadow is
+ * restored immediately and VRAM is never touched, so the top screen is
+ * unaffected and an open dialogue window cannot overwrite the panel. The
+ * tiles themselves are the game's, so the result is pixel-identical to the
+ * battle panels rather than a reconstruction.
+ *
+ * Returns 0 if nothing could be drawn (no party yet, or the window tiles are
+ * not resident), so the caller can fall back to the composed text panel. */
+#define HPPP_SHADOW_ROW0  ACTIVE_HPPP_WINDOW_Y_OFFSET
+#define HPPP_SHADOW_ROWS  (HPPP_WINDOW_HEIGHT + 2)
+
+static int draw_overworld_hppp(int dest_y) {
+    int count = game_state.player_controlled_party_count;
+    if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
+    if (count <= 0)
+        return 0;
+
+    const int panel_px_w0 = HPPP_WINDOW_WIDTH * 8;
+    const int ox0 = (BOTTOM_WIDTH - count * panel_px_w0) / 2;
+
+    /* The game is already rendering its own HP/PP windows (the B menu), so
+     * they are live in VRAM. Read those rather than running a second draw --
+     * draw_hp_pp_window() also fills win.hppp_window_buffer, which the real
+     * path owns while it is active. */
+    if (ow.render_hppp_windows & 0xFF) {
+        for (int i = 0; i < count; i++) {
+            int tx = HPPP_CENTER_TILE - (count * HPPP_WINDOW_WIDTH) / 2
+                     + i * HPPP_WINDOW_WIDTH;
+            int ty = (win.battle_menu_current_character_id == (int16_t)i)
+                     ? ACTIVE_HPPP_WINDOW_Y_OFFSET : NORMAL_HPPP_WINDOW_Y_OFFSET;
+            if (tilemap_rect_blank(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT))
+                continue;
+            draw_tilemap_rect(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
+                              ox0 + i * panel_px_w0, dest_y, 1);
+        }
+        return dest_y + HPPP_WINDOW_HEIGHT * 8;
+    }
+
+    static uint8_t saved[HPPP_SHADOW_ROWS * 64];
+    const size_t off = (size_t)HPPP_SHADOW_ROW0 * 64;
+    memcpy(saved, &win.bg2_buffer[off], sizeof(saved));
+
+    uint8_t save_render = ow.render_hppp_windows;
+    uint8_t save_drawn  = ow.currently_drawn_hppp_windows;
+    int16_t save_sel    = win.battle_menu_current_character_id;
+
+    /* No battle-menu highlight outside battle: every panel sits on the
+     * NORMAL row, so they line up as one strip. */
+    win.battle_menu_current_character_id = -1;
+    ow.render_hppp_windows = 1;
+    ow.currently_drawn_hppp_windows = 0xFF;
+
+    memset(&win.bg2_buffer[off], 0, sizeof(saved));
+    for (int i = 0; i < count; i++)
+        draw_hp_pp_window((uint16_t)i);
+
+    const int panel_px_w = HPPP_WINDOW_WIDTH * 8;
+    const int row_w = count * panel_px_w;
+    const int ox = (BOTTOM_WIDTH - row_w) / 2;
+    const int ty = NORMAL_HPPP_WINDOW_Y_OFFSET;
+
+    int drawn = 0;
+    for (int i = 0; i < count; i++) {
+        int tx = HPPP_CENTER_TILE - (count * HPPP_WINDOW_WIDTH) / 2
+                 + i * HPPP_WINDOW_WIDTH;
+        draw_tilemap_rect_src(win.bg2_buffer, tx, ty,
+                              HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
+                              ox + i * panel_px_w, dest_y, 1);
+        drawn++;
+    }
+
+    memcpy(&win.bg2_buffer[off], saved, sizeof(saved));
+    ow.render_hppp_windows = save_render;
+    ow.currently_drawn_hppp_windows = save_drawn;
+    win.battle_menu_current_character_id = save_sel;
+
+    return drawn ? dest_y + HPPP_WINDOW_HEIGHT * 8 : 0;
+}
+
 static void draw_bottom_panel(void) {
     const pixel_t bg    = PIXEL_RGB(16, 16, 32);
     const pixel_t label = PIXEL_RGB(160, 160, 176);
     const pixel_t value = PIXEL_RGB(255, 255, 255);
 
     fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, bg);
+
+    /* Preferred: the game's own HP/PP panels, identical to the battle ones. */
+    if (draw_overworld_hppp(6) > 0)
+        return;
+
+    /* Fallback -- composed text, used before the window tiles are resident
+     * (title screen, file select, the first frames of a load). */
 
     /* font_get_glyph returns NULL until the font tiles are loaded. */
     if (!font_get_glyph(FONT_ID_TINY, 0))
@@ -550,20 +661,30 @@ void platform_video_end_frame(void) {
              * overworld's whole headroom -- it dropped the frame rate into the
              * mid 40s -- so only redraw when something it shows has changed.
              * Both buffers need the new image, hence two presents. */
+            /* Mirror exactly what draw_hp_pp_window() reads, including the
+             * party_members/party_characters indexing it uses -- a signature
+             * over different fields can hold a stale panel on screen. The
+             * fractions are in here because they drive the rolling digits, so
+             * the panel animates a change instead of snapping to the result. */
             uint32_t sig = 2166136261u;
             int count = game_state.player_controlled_party_count;
             sig = (sig ^ (uint32_t)count) * 16777619u;
-            for (int i = 0; i < count && i < 4; i++) {
-                uint8_t id = game_state.player_controlled_party_members[i];
-                if (id >= TOTAL_PARTY_COUNT)
+            for (int i = 0; i < count && i < HPPP_MAX_PARTY; i++) {
+                uint8_t member_id = game_state.party_members[i];
+                if (member_id == 0 || member_id > TOTAL_PARTY_COUNT)
                     continue;
-                const CharStruct *ch = &party_characters[id];
-                uint32_t vals[4] = { ch->current_hp, ch->max_hp,
-                                     ch->current_pp, ch->max_pp };
-                for (int v = 0; v < 4; v++)
+                const CharStruct *ch = &party_characters[member_id - 1];
+                uint32_t vals[7] = { ch->current_hp, ch->max_hp,
+                                     ch->current_pp, ch->max_pp,
+                                     ch->current_hp_fraction,
+                                     ch->current_pp_fraction,
+                                     ch->hp_pp_window_options };
+                for (int v = 0; v < 7; v++)
                     sig = (sig ^ vals[v]) * 16777619u;
                 for (int c = 0; c < 5; c++)
                     sig = (sig ^ ch->name[c]) * 16777619u;
+                for (int a = 0; a < AFFLICTION_GROUP_COUNT; a++)
+                    sig = (sig ^ ch->afflictions[a]) * 16777619u;
             }
             if (sig != last_sig) {
                 last_sig = sig;
