@@ -670,14 +670,12 @@ typedef struct {
 } OptionRow;
 
 bool video_opt_fps;
-bool video_opt_battle_bg = true;
 /* Shown as the player sees it -- Letterbox On means bars present -- and
  * inverted when handed to the game, whose flag is a disable. */
 static bool opt_letterbox_on = true;
 
 static const OptionRow option_rows[] = {
     { "Screen",      NULL,                   &video_opt_view_width },
-    { "Battle b.g.", &video_opt_battle_bg,   NULL },
     { "Letterbox",   &opt_letterbox_on,      NULL },
     { "FPS meter",   &video_opt_fps,         NULL },
 };
@@ -1209,21 +1207,12 @@ static const WindowInfo *routed_menu_window(void) {
  * beneath them -- the game has already drawn both into the window layer, so
  * these are its own panels, not a reconstruction. */
 static void draw_battle_bottom(void) {
-    /* The battle scene behind the panels. This is the composited top-screen
-     * frame scaled to the bottom screen, so it carries the background exactly
-     * as drawn -- letterbox bars and all -- but also the enemy sprites, since
-     * a port only ever receives finished scanlines. Isolating the BG layers
-     * would mean a second full PPU pass, which battle has no headroom for. */
-    if (video_opt_battle_bg) {
-        for (int y = 0; y < BOTTOM_HEIGHT; y++) {
-            const pixel_t *src = &frame[y * EB_VIEWPORT_WIDTH];
-            pixel_t *dst = &bottom_img[y * BOTTOM_WIDTH];
-            for (int x = 0; x < BOTTOM_WIDTH; x++)
-                dst[x] = src[(x * EB_VIEWPORT_WIDTH) / BOTTOM_WIDTH];
-        }
-    } else {
-        fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, PIXEL_RGB(0, 0, 0));
-    }
+    /* Flat black behind the panels. Mirroring the battle scene here was tried
+     * and dropped: a port only receives composited scanlines, so the copy
+     * carried the enemy sprites along with the background, and a sprite
+     * sitting behind the UI is more distracting than a plain backdrop.
+     * Isolating the BG layers would need a second full PPU pass. */
+    fill_rect(0, 0, BOTTOM_WIDTH, BOTTOM_HEIGHT, PIXEL_RGB(0, 0, 0));
 
     int count = game_state.player_controlled_party_count;
     if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
