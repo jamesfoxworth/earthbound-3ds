@@ -6,6 +6,7 @@
 #include "include/binary.h"
 #include "game/game_state.h"
 #include "core/mode_stack.h"
+#include "touch.h"
 #include "core/types.h"
 #include <3ds.h>
 #include <string.h>
@@ -159,10 +160,27 @@ void platform_video_begin_frame(void) {
     suppress_apply();
 }
 
+/* Set from the options panel; defined further down with the other options. */
+extern bool video_opt_pillarbox;   /* declared extern near send_scanline */
+
 void platform_video_send_scanline(int y, const pixel_t *pixels) {
     if (y < 0 || y >= EB_VIEWPORT_HEIGHT)
         return;
-    memcpy(&frame[y * EB_VIEWPORT_WIDTH], pixels, EB_VIEWPORT_WIDTH * sizeof(pixel_t));
+    pixel_t *row = &frame[y * EB_VIEWPORT_WIDTH];
+    memcpy(row, pixels, EB_VIEWPORT_WIDTH * sizeof(pixel_t));
+
+    /* "Widescreen off": the viewport width is a build-time constant, so the
+     * game still renders 400 wide and the extra columns are blanked here.
+     * Content stays exactly where it is -- this crops rather than rescaling,
+     * which is what makes it free. */
+#if EB_VIEWPORT_WIDTH > SNES_WIDTH
+    if (video_opt_pillarbox) {
+        const int pad = (EB_VIEWPORT_WIDTH - SNES_WIDTH) / 2;
+        memset(row, 0, (size_t)pad * sizeof(pixel_t));
+        memset(row + pad + SNES_WIDTH, 0,
+               (size_t)(EB_VIEWPORT_WIDTH - pad - SNES_WIDTH) * sizeof(pixel_t));
+    }
+#endif
 }
 
 pixel_t *platform_video_get_framebuffer(void) {
@@ -487,10 +505,16 @@ static int draw_money_box(int right_x, int dest_y) {
 
 /* Settings entry. Not interactive yet -- touch input still has to be put
  * back -- so this is the placeholder the hub will hang off. */
+static int settings_hit_x, settings_hit_y, settings_hit_w, settings_hit_h;
+
 static int draw_settings_box(int right_x, int dest_y, int rows) {
     const int tiles_w = 4;
     const int box_w = tiles_w * 8;
     int x = right_x - box_w;
+    settings_hit_x = x;
+    settings_hit_y = dest_y;
+    settings_hit_w = box_w;
+    settings_hit_h = (rows + 2) * 8;
     draw_window_box(tiles_w, rows + 2, x, dest_y);
 
     const pixel_t ink = PIXEL_RGB(255, 255, 255);
@@ -508,6 +532,85 @@ static int draw_settings_box(int right_x, int dest_y, int rows) {
         }
     }
     return box_w;
+}
+
+/* ---- Options panel -------------------------------------------------------
+ *
+ * Opened from the settings box. Runtime-adjustable things only: the viewport
+ * width is a build-time constant (it sizes the staging buffer, the PPU's
+ * render width and the window scaling), so "widescreen off" is a render-time
+ * pillarbox to the native 256 rather than a resolution change. */
+bool video_opt_pillarbox;
+
+static bool options_open;
+
+typedef struct {
+    const char *label;
+    bool       *flag;
+} OptionRow;
+
+static const OptionRow option_rows[] = {
+    { "PILLARBOX",  &video_opt_pillarbox },
+};
+#define OPTION_ROW_COUNT ((int)(sizeof(option_rows) / sizeof(option_rows[0])))
+
+#define OPT_X      20
+#define OPT_Y      44
+#define OPT_W      280
+#define OPT_ROW_H  28
+
+static void draw_options_panel(void) {
+    int prev = font_id_cur;
+    font_id_cur = FONT_ID_NORMAL;
+    if (!font_get_glyph(font_id_cur, 0)) { font_id_cur = prev; return; }
+
+    int rows = box_rows_for_font();
+    int tiles_w = OPT_W / 8;
+    int tiles_h = 2 + rows * (OPTION_ROW_COUNT + 1) + OPTION_ROW_COUNT + 1;
+    draw_window_box(tiles_w, tiles_h, OPT_X, OPT_Y);
+
+    const pixel_t ink = PIXEL_RGB(255, 255, 255);
+    const pixel_t dim = PIXEL_RGB(150, 150, 165);
+    int y = OPT_Y + 10;
+    draw_ascii(OPT_X + 10, y, "OPTIONS", 1, ink);
+    y += OPT_ROW_H;
+
+    for (int i = 0; i < OPTION_ROW_COUNT; i++) {
+        draw_ascii(OPT_X + 10, y, option_rows[i].label, 1,
+                   *option_rows[i].flag ? ink : dim);
+        draw_ascii(OPT_X + OPT_W - 60, y,
+                   *option_rows[i].flag ? "ON" : "OFF", 1,
+                   *option_rows[i].flag ? ink : dim);
+        y += OPT_ROW_H;
+    }
+    draw_ascii(OPT_X + 10, y, "CLOSE", 1, dim);
+    font_id_cur = prev;
+}
+
+/* Returns true when the tap was consumed (so it does not also reach the
+ * game or the FPS corner). */
+static bool options_handle_touch(const TouchState *t) {
+    if (!t->pressed)
+        return false;
+
+    int y = OPT_Y + 10 + OPT_ROW_H;
+    for (int i = 0; i < OPTION_ROW_COUNT; i++) {
+        if (touch_in(t, OPT_X, y - 6, OPT_W, OPT_ROW_H)) {
+            *option_rows[i].flag = !*option_rows[i].flag;
+            return true;
+        }
+        y += OPT_ROW_H;
+    }
+    if (touch_in(t, OPT_X, y - 6, OPT_W, OPT_ROW_H)) {
+        options_open = false;
+        return true;
+    }
+    /* A tap anywhere outside the panel closes it. */
+    if (!touch_in(t, OPT_X, OPT_Y, OPT_W, OPT_ROW_H * (OPTION_ROW_COUNT + 2))) {
+        options_open = false;
+        return true;
+    }
+    return true;   /* swallow taps inside the panel */
 }
 
 static const WindowInfo *routed_menu_window(void) {
@@ -672,7 +775,10 @@ static void draw_bottom_panel(void) {
     draw_money_box(right, HPPP_TOPROW_Y);
 
     /* The game's own HP/PP panels, identical to the battle ones, centred. */
-    if (draw_overworld_hppp(HPPP_CARDS_Y) > 0)
+    bool have_cards = draw_overworld_hppp(HPPP_CARDS_Y) > 0;
+    if (options_open)
+        draw_options_panel();
+    if (have_cards)
         return;
 
     /* Fallback -- composed text, used before the window tiles are resident
@@ -793,6 +899,25 @@ void platform_video_end_frame(void) {
                         root_phase != OWP_BOOT_FLUSH);
 
         int context = !in_game ? 2 : (ow.battle_mode ? 1 : 0);
+
+        /* Touch: the options panel takes taps while it is open, otherwise
+         * the settings box opens it. Overworld only -- battle owns the
+         * bottom screen for its command menu. */
+        bool touch_dirty = false;
+        if (context == 0) {
+            const TouchState *t = touch_get();
+            if (options_open) {
+                if (options_handle_touch(t))
+                    touch_dirty = true;
+            } else if (t->pressed &&
+                       touch_in(t, settings_hit_x, settings_hit_y,
+                                settings_hit_w, settings_hit_h)) {
+                options_open = true;
+                touch_dirty = true;
+            }
+        } else if (options_open) {
+            options_open = false;
+        }
         if (context != last_context) {
             /* Elements only clear their own rectangles, so the previous
              * context's pixels would otherwise survive underneath. */
@@ -880,7 +1005,7 @@ void platform_video_end_frame(void) {
             } else if (res == last_res) {
                 res_wait = 0;
             }
-            if (sig != last_sig) {
+            if (sig != last_sig || touch_dirty) {
                 last_sig = sig;
                 draw_bottom_panel();
                 present_left = 2;

@@ -1,6 +1,7 @@
 #include "platform/platform.h"
 #include "include/pad.h"
 #include "game/window.h"
+#include "touch.h"
 #include <3ds.h>
 
 
@@ -13,6 +14,9 @@ static uint16_t pad_state;
 static uint16_t pad_prev;
 static uint16_t aux_state;
 static bool quit_requested;
+static TouchState touch;
+
+const TouchState *touch_get(void) { return &touch; }
 
 bool platform_input_init(void) {
     pad_state = 0;
@@ -64,7 +68,25 @@ void platform_input_poll(void) {
     aux_state = 0;
     if (held & KEY_ZR) aux_state |= AUX_DEBUG_DUMP;
 
-    if (held & KEY_TOUCH) aux_state |= AUX_FPS_TOGGLE;
+    /* Touch state for the bottom-screen UI. hidTouchRead only reports a
+     * position while the screen is held, so the last one is kept for the
+     * release frame -- a tap is resolved against where it started. */
+    bool was_down = touch.down;
+    touch.down = (held & KEY_TOUCH) != 0;
+    if (touch.down) {
+        touchPosition tp;
+        hidTouchRead(&tp);
+        touch.x = tp.px;
+        touch.y = tp.py;
+    }
+    touch.pressed  = touch.down && !was_down;
+    touch.released = !touch.down && was_down;
+
+    /* The FPS/profiling overlay used to toggle on a touch anywhere, which
+     * now collides with every control on the bottom screen. Moved to the
+     * bottom-right corner patch so the rest of the panel is free. */
+    if (touch.down && touch.x >= 288 && touch.y >= 208)
+        aux_state |= AUX_FPS_TOGGLE;
 }
 
 uint16_t platform_input_get_pad(void) {
