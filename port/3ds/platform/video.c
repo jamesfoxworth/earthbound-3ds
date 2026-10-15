@@ -60,10 +60,15 @@ bool platform_video_init(void) {
          * and writing into the buffer being scanned out shows as a band
          * tearing down the image. */
         gfxSetDoubleBuffering(GFX_BOTTOM, true);
-        u16 bw = 0, bh = 0;
-        u8 *bfb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
-        if (bfb)
-            memset(bfb, 0, (size_t)bw * bh * sizeof(pixel_t));
+        /* Both buffers: elements are redrawn individually afterwards, so
+         * whatever is not covered has to start blank in each. */
+        for (int i = 0; i < 2; i++) {
+            u16 bw = 0, bh = 0;
+            u8 *bfb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
+            if (bfb)
+                memset(bfb, 0, (size_t)bw * bh * sizeof(pixel_t));
+            gfxSwapBuffers();
+        }
         consoleDebugInit(debugDevice_NULL);
     }
 
@@ -88,8 +93,125 @@ void platform_video_shutdown(void) {
     gfxExit();
 }
 
+
+/* ---- Top-screen suppression ---------------------------------------------
+ *
+ * Whatever is shown on the bottom screen is removed from the top, so battle
+ * leaves just the background and the enemies.
+ *
+ * The window layer is shared state the top screen renders from every frame,
+ * so rather than changing how the game maintains it, the routed tile
+ * rectangles are snapshotted and blanked in begin_frame, and put back in
+ * end_frame once the PPU has consumed them. VRAM therefore only differs from
+ * what the game wrote during the render itself: no redraw flags to poke, no
+ * state left behind when routing stops, and the debug dumps (which run after
+ * end_frame) still see the real tilemap.
+ *
+ * A zero entry is how the window code blanks its own cells (see the memsets
+ * in clear_hppp_window), so it is the game's own idea of an empty tile.
+ */
+static const WindowInfo *focused_window(void);
+
+#define SUPPRESS_MAX_RECTS   8
+#define SUPPRESS_MAX_ENTRIES 1024
+
+static struct {
+    int      n_rects;
+    struct { int tx, ty, tw, th; } rect[SUPPRESS_MAX_RECTS];
+    uint16_t saved[SUPPRESS_MAX_ENTRIES];
+    int      n_saved;
+} suppress;
+
+static void suppress_add(int tx, int ty, int tw, int th) {
+    if (suppress.n_rects >= SUPPRESS_MAX_RECTS)
+        return;
+    if (suppress.n_saved + tw * th > SUPPRESS_MAX_ENTRIES)
+        return;
+    suppress.rect[suppress.n_rects].tx = tx;
+    suppress.rect[suppress.n_rects].ty = ty;
+    suppress.rect[suppress.n_rects].tw = tw;
+    suppress.rect[suppress.n_rects].th = th;
+    suppress.n_rects++;
+    suppress.n_saved += tw * th;
+}
+
+/* The menu window routed to the bottom screen, or NULL. Battle dialogue stays
+ * on the top screen, so it is neither moved down nor suppressed. */
+static const WindowInfo *routed_menu_window(void) {
+    const WindowInfo *w = focused_window();
+    if (!w || w->width == 0 || w->height == 0)
+        return NULL;
+    if (w->id == WINDOW_TEXT_BATTLE)
+        return NULL;
+    return w;
+}
+
+static void suppress_collect(void) {
+    suppress.n_rects = 0;
+    suppress.n_saved = 0;
+
+    if (platform_console_logging || !ow.battle_mode)
+        return;
+
+    int count = game_state.player_controlled_party_count;
+    if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
+    for (int i = 0; i < count; i++) {
+        int tx = HPPP_CENTER_TILE - (count * HPPP_WINDOW_WIDTH) / 2
+                 + i * HPPP_WINDOW_WIDTH;
+        int ty = (win.battle_menu_current_character_id == (int16_t)i)
+                 ? ACTIVE_HPPP_WINDOW_Y_OFFSET : NORMAL_HPPP_WINDOW_Y_OFFSET;
+        suppress_add(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT);
+    }
+
+    const WindowInfo *w = routed_menu_window();
+    if (w)
+        suppress_add(w->x, w->y, w->width, w->height);
+}
+
+/* Blank the collected rectangles, saving what was there. */
+static void suppress_apply(void) {
+    const uint32_t map_base = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
+    int k = 0;
+    for (int r = 0; r < suppress.n_rects; r++) {
+        for (int ty = 0; ty < suppress.rect[r].th; ty++) {
+            for (int tx = 0; tx < suppress.rect[r].tw; tx++) {
+                uint32_t a = map_base +
+                    ((size_t)((((suppress.rect[r].ty + ty) & 31) * 32) +
+                              ((suppress.rect[r].tx + tx) & 31))) * 2;
+                if (a + 1 >= VRAM_SIZE) { k++; continue; }
+                suppress.saved[k++] = read_u16_le(&ppu.vram[a]);
+                ppu.vram[a] = 0;
+                ppu.vram[a + 1] = 0;
+            }
+        }
+    }
+}
+
+static void suppress_restore(void) {
+    const uint32_t map_base = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
+    int k = 0;
+    for (int r = 0; r < suppress.n_rects; r++) {
+        for (int ty = 0; ty < suppress.rect[r].th; ty++) {
+            for (int tx = 0; tx < suppress.rect[r].tw; tx++) {
+                uint32_t a = map_base +
+                    ((size_t)((((suppress.rect[r].ty + ty) & 31) * 32) +
+                              ((suppress.rect[r].tx + tx) & 31))) * 2;
+                if (a + 1 >= VRAM_SIZE) { k++; continue; }
+                uint16_t v = suppress.saved[k++];
+                ppu.vram[a] = (uint8_t)(v & 0xFF);
+                ppu.vram[a + 1] = (uint8_t)(v >> 8);
+            }
+        }
+    }
+    suppress.n_rects = 0;
+    suppress.n_saved = 0;
+}
+
 void platform_video_begin_frame(void) {
-    /* Scanlines land in the staging buffer; nothing to prepare. */
+    /* Scanlines land in the staging buffer. Take the window layer's routed
+     * rectangles out before the PPU reads it; end_frame puts them back. */
+    suppress_collect();
+    suppress_apply();
 }
 
 void platform_video_send_scanline(int y, const pixel_t *pixels) {
@@ -152,6 +274,33 @@ static inline void put_px(u16 *fb, int fbw, int x, int y, pixel_t c) {
     if (x < 0 || x >= BOTTOM_WIDTH || y < 0 || y >= BOTTOM_HEIGHT)
         return;
     fb[(size_t)x * fbw + (fbw - 1 - y)] = c;
+}
+
+/* True when every tilemap entry in the rectangle is zero, i.e. the window code
+ * has cleared it and not yet redrawn. Redrawing the bottom screen from that
+ * would show one black frame, which reads as a flicker on a panel that is
+ * always on screen, so those frames are skipped instead. */
+static bool tilemap_rect_blank(int tile_x, int tile_y, int tiles_w, int tiles_h) {
+    const uint32_t map_base = (uint32_t)(ppu.bg_sc[2] & 0xFC) << 9;
+    for (int ty = 0; ty < tiles_h; ty++) {
+        for (int tx = 0; tx < tiles_w; tx++) {
+            uint32_t a = map_base +
+                ((size_t)((((tile_y + ty) & 31) * 32) + ((tile_x + tx) & 31))) * 2;
+            if (a + 1 >= VRAM_SIZE)
+                continue;
+            if (read_u16_le(&ppu.vram[a]) != 0)
+                return false;
+        }
+    }
+    return true;
+}
+
+/* Fill a destination rectangle, used before redrawing one element so stale
+ * pixels do not show through. */
+static void fill_rect(u16 *fb, int fbw, int x, int y, int w, int h, pixel_t c) {
+    for (int iy = 0; iy < h; iy++)
+        for (int ix = 0; ix < w; ix++)
+            put_px(fb, fbw, x + ix, y + iy, c);
 }
 
 /* Rasterise a rectangle of the BG3 tilemap to the bottom screen. BG3 is the
@@ -268,11 +417,14 @@ static int draw_eb(u16 *fb, int fbw, int x, int y, const uint8_t *eb, int max,
  * beneath them -- the game has already drawn both into the window layer, so
  * these are its own panels, not a reconstruction. */
 static void draw_battle_bottom(u16 *fb, int fbw) {
+    const pixel_t bg = PIXEL_RGB(0, 0, 0);
+
     int count = game_state.player_controlled_party_count;
     if (count > HPPP_MAX_PARTY) count = HPPP_MAX_PARTY;
     if (count < 0) count = 0;
 
     const int panel_px_w = HPPP_WINDOW_WIDTH * 8;
+    const int panel_px_h = HPPP_WINDOW_HEIGHT * 8;
     int row_w = count * panel_px_w;
     int ox = (BOTTOM_WIDTH - row_w) / 2;
 
@@ -281,19 +433,29 @@ static void draw_battle_bottom(u16 *fb, int fbw) {
                  + i * HPPP_WINDOW_WIDTH;
         int ty = (win.battle_menu_current_character_id == (int16_t)i)
                  ? ACTIVE_HPPP_WINDOW_Y_OFFSET : NORMAL_HPPP_WINDOW_Y_OFFSET;
+        if (tilemap_rect_blank(tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT))
+            continue;   /* mid-redraw: keep what is already shown */
+        int dx = ox + i * panel_px_w;
+        fill_rect(fb, fbw, dx, 6, panel_px_w, panel_px_h, bg);
         draw_tilemap_rect(fb, fbw, tx, ty, HPPP_WINDOW_WIDTH, HPPP_WINDOW_HEIGHT,
-                          ox + i * panel_px_w, 6, 1);
+                          dx, 6, 1);
     }
 
-    const WindowInfo *w = focused_window();
-    if (!w || w->width == 0 || w->height == 0)
+    int my = 6 + panel_px_h + 10;
+    const WindowInfo *w = routed_menu_window();
+    if (!w) {
+        fill_rect(fb, fbw, 0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
         return;
+    }
 
     int menu_w = w->width * 8;
     int menu_h = w->height * 8;
-    int my = 6 + HPPP_WINDOW_HEIGHT * 8 + 10;
     if (menu_h > BOTTOM_HEIGHT - my)
         return;
+    if (tilemap_rect_blank(w->x, w->y, w->width, w->height))
+        return;
+
+    fill_rect(fb, fbw, 0, my, BOTTOM_WIDTH, BOTTOM_HEIGHT - my, bg);
     draw_tilemap_rect(fb, fbw, w->x, w->y, w->width, w->height,
                       (BOTTOM_WIDTH - menu_w) / 2, my, 1);
 }
@@ -401,14 +563,14 @@ void platform_video_end_frame(void) {
     /* Bottom screen: in battle show the game's own menu window, which is the
      * UI that belongs down here; elsewhere show the composed status panel.
      * Skipped while the debug console owns the screen. */
+    suppress_restore();
+
     if (!platform_console_logging) {
         if (ow.battle_mode) {
             u16 bw = 0, bh = 0;
             u16 *bfb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
-            if (bfb) {
-                memset(bfb, 0, (size_t)bw * bh * sizeof(pixel_t));
+            if (bfb)
                 draw_battle_bottom(bfb, bw);
-            }
         } else {
             draw_bottom_panel();
         }
