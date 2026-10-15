@@ -54,9 +54,14 @@ void platform_input_poll(void) {
 
     /* Touching the bottom screen toggles the FPS/profiling overlay (the
      * desktop port's F3). Reported as a raw level; game_main.c does the edge
-     * detection and toggling centrally, so one tap is one toggle. Chosen over
-     * ZL/ZR because those only exist on New 3DS. */
-    aux_state = (held & KEY_TOUCH) ? AUX_FPS_TOGGLE : 0;
+     * detection and toggling centrally, so one tap is one toggle.
+     *
+     * ZR dumps PPU state to the SD card (the desktop port's F1): screenshot,
+     * VRAM, CGRAM, the PPU registers and the window tilemap buffer. New 3DS
+     * only, which is fine for a debugging aid. */
+    aux_state = 0;
+    if (held & KEY_TOUCH) aux_state |= AUX_FPS_TOGGLE;
+    if (held & KEY_ZR)    aux_state |= AUX_DEBUG_DUMP;
 }
 
 uint16_t platform_input_get_pad(void) {
